@@ -28,30 +28,79 @@ public static class GoogleCrawlerService
         var page = await session.NewWorkPageAsync();
         try { await page.BringToFrontAsync(); } catch { /* ignore */ }
         var results = new List<CrawlResult>();
+        var total = config.Keywords.Count;
+        var round = 0;
 
-        foreach (var keyword in config.Keywords)
+        void FlushResults()
         {
-            ct.ThrowIfCancellationRequested();
-            log.Report("-----");
-            log.Report("Từ khóa: " + keyword);
-            var item = await ProcessKeywordAsync(page, session, keyword, config, log, ct);
-            if (config.SaveHtml && item.Found)
-                ResultWriter.WriteHtml(runFolder, item);
-            item.Html = null; // bỏ HTML khỏi RAM sau khi đã ghi file
-            results.Add(item);
-            await DelayAsync(config, ct);
+            if (config.SaveJson)
+                ResultWriter.WriteJson(runFolder, results);
+            if (config.SaveCsv)
+                ResultWriter.WriteCsv(runFolder, results);
         }
 
-        if (config.SaveJson)
-            ResultWriter.WriteJson(runFolder, results);
-        if (config.SaveCsv)
-            ResultWriter.WriteCsv(runFolder, results);
+        try
+        {
+            if (config.AutoRepeat)
+                log.Report("Đã bật tự động lặp lại — quét hết từ khóa sẽ chạy lại từ đầu. Bấm Dừng để thoát.");
 
-        log.Report("Hoàn tất. Đã lưu vào: " + runFolder);
-        return (runFolder, results);
+            while (true)
+            {
+                round++;
+                ct.ThrowIfCancellationRequested();
+                if (config.AutoRepeat)
+                {
+                    log.Report(round > 1
+                        ? $"----- Đã quét hết {total} từ khóa. Bắt đầu lại từ đầu (lượt {round}) -----"
+                        : $"----- Lượt {round} -----");
+                }
+
+                var roundStart = results.Count;
+                var index = 0;
+                foreach (var keyword in config.Keywords)
+                {
+                    index++;
+                    ct.ThrowIfCancellationRequested();
+                    log.Report("-----");
+                    log.Report(config.AutoRepeat
+                        ? $"Lượt {round} — từ khóa {index}/{total}: {keyword}"
+                        : $"Từ khóa {index}/{total}: {keyword}");
+                    var item = await ProcessKeywordAsync(page, session, keyword, config, log, ct);
+                    if (config.SaveHtml && item.Found)
+                        ResultWriter.WriteHtml(runFolder, item);
+                    item.Html = null; // bỏ HTML khỏi RAM sau khi đã ghi file
+                    results.Add(item);
+                    await DelayAsync(config, ct);
+                }
+
+                FlushResults();
+                if (config.AutoRepeat)
+                {
+                    var roundCount = results.Count - roundStart;
+                    var foundThisRound = results.Skip(roundStart).Count(r => r.Found);
+                    log.Report($"Xong lượt {round}. Khớp {foundThisRound}/{roundCount} từ khóa.");
+                }
+
+                if (!config.AutoRepeat)
+                    break;
+
+                await DelayAsync(config, ct);
+            }
+
+            log.Report("Hoàn tất. Đã lưu vào: " + runFolder);
+            return (runFolder, results);
+        }
+        catch (OperationCanceledException)
+        {
+            FlushResults();
+            log.Report(config.AutoRepeat && round > 0
+                ? $"Đã dừng sau {round} lượt. Đã lưu vào: " + runFolder
+                : "Đã lưu kết quả vào: " + runFolder);
+            return (runFolder, results);
+        }
     }
 
-    /// <summary>Xử lý 1 từ khóa: search → lật trang → khớp → click → crawl.</summary>
+    /// <summary>1 từ khóa: search → khớp → click → crawl → cuộn cuối trang → chờ 2s → back.</summary>
     static async Task<CrawlResult> ProcessKeywordAsync(
         IPage page,
         BrowserSession session,
@@ -114,6 +163,7 @@ public static class GoogleCrawlerService
 
             if (matched == null)
             {
+                log.Report("  Bỏ qua từ khóa này, chuyển từ khóa tiếp theo.");
                 return new CrawlResult
                 {
                     Keyword = keyword,
@@ -155,6 +205,8 @@ public static class GoogleCrawlerService
             }
 
             log.Report("  Title: " + Truncate(title, 120));
+            await ScrollToBottomAndWaitAsync(targetPage, log, ct);
+            await GoBackAfterVisitAsync(targetPage, page, session, log, ct);
             return result;
         }
         catch (OperationCanceledException)
@@ -525,6 +577,90 @@ public static class GoogleCrawlerService
         {
             return "";
         }
+    }
+
+    /// <summary>Cuộn từng đoạn tới cuối trang (nội dung lazy-load cũng kịp ra), rồi chờ 2 giây.</summary>
+    static async Task ScrollToBottomAndWaitAsync(IPage page, IProgress<string> log, CancellationToken ct)
+    {
+        if (page.IsClosed)
+            return;
+
+        log.Report("  Cuộn xuống cuối trang...");
+        try
+        {
+            await page.BringToFrontAsync();
+            for (var i = 0; i < 20; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var atBottom = await page.EvaluateAsync<bool>(
+                    "() => (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 40)");
+                if (atBottom)
+                    break;
+                await page.Mouse.WheelAsync(0, 850);
+                await page.WaitForTimeoutAsync(280);
+            }
+
+            await page.EvaluateAsync("() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })");
+            await page.WaitForTimeoutAsync(400);
+            log.Report("  Đã tới cuối trang, chờ 2 giây...");
+            await Task.Delay(2000, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log.Report("  Cuộn trang: " + ex.Message);
+            await Task.Delay(2000, ct);
+        }
+    }
+
+    /// <summary>Back về Google. Tab mới thì đóng tab đích; cùng tab thì GoBack.</summary>
+    static async Task GoBackAfterVisitAsync(IPage targetPage, IPage searchPage, BrowserSession session, IProgress<string> log, CancellationToken ct)
+    {
+        log.Report("  Back về Google, chuẩn bị từ khóa tiếp theo...");
+        try
+        {
+            if (!ReferenceEquals(targetPage, searchPage) && !targetPage.IsClosed)
+            {
+                try { await targetPage.CloseAsync(); } catch { /* ignore */ }
+                session.OwnedPages.Remove(targetPage);
+                if (!searchPage.IsClosed)
+                    await searchPage.BringToFrontAsync();
+                return;
+            }
+
+            if (targetPage.IsClosed)
+                return;
+
+            await targetPage.GoBackAsync(new PageGoBackOptions
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = 20000
+            });
+        }
+        catch (Exception ex)
+        {
+            log.Report("  GoBack lỗi, mở lại Google: " + ex.Message);
+            try
+            {
+                if (!searchPage.IsClosed)
+                {
+                    await searchPage.GotoAsync("https://www.google.com/?hl=vi", new PageGotoOptions
+                    {
+                        WaitUntil = WaitUntilState.DOMContentLoaded,
+                        Timeout = 20000
+                    });
+                }
+            }
+            catch
+            {
+                // từ khóa sau sẽ tự mở Google
+            }
+        }
+
+        await Task.Delay(400, ct);
     }
 
     static Task DelayAsync(JobConfig config, CancellationToken ct)

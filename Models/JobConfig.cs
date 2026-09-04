@@ -34,7 +34,10 @@ public sealed class JobConfig
     public required InstalledBrowser Browser { get; init; }
     public required BrowserProfileInfo Profile { get; init; }
 
-    /// <summary>Mỗi phần tử = 1 từ khóa Google.</summary>
+    /// <summary>site trên API scan — lấy từ dòng từ khóa đầu tiên.</summary>
+    public string ScanSite { get; init; } = "";
+
+    /// <summary>Mỗi phần tử = 1 từ khóa Google — đồng thời gửi lên API làm key.</summary>
     public required IReadOnlyList<string> Keywords { get; init; }
 
     /// <summary>URL hoặc domain cần tìm trong kết quả search.</summary>
@@ -47,6 +50,15 @@ public sealed class JobConfig
 
     /// <summary>Nghỉ giữa các thao tác (ms) cho giống người dùng, giảm bị chặn.</summary>
     public int DelayMs { get; init; } = 1500;
+
+    /// <summary>
+    /// true = sau khi quét hết danh sách từ khóa thì chạy lại từ đầu, tới khi bấm Dừng.
+    /// false = chỉ chạy 1 lượt rồi kết thúc (luồng mặc định).
+    /// </summary>
+    public bool AutoRepeat { get; init; }
+
+    /// <summary>null = mở trình duyệt không qua proxy.</summary>
+    public BrowserProxy? Proxy { get; init; }
 
     public required string OutputDirectory { get; init; }
     public bool SaveHtml { get; init; } = true;

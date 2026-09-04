@@ -10,8 +10,10 @@ namespace AutoClick;
 ///   Tiêu đề / kích thước cửa sổ     → constructor MainForm()
 ///   Giá trị mặc định từ khóa, link  → _txtKeywords.Text / _txtTargets.Text
 ///   Delay, số trang mặc định        → _numDelay.Value / _numPages.Value
+///   Tự động lặp lại từ khóa         → _chkAutoRepeat.Checked
+///   Proxy trình duyệt               → _txtProxy.Text
 ///   Thư mục lưu mặc định            → _txtOutput.Text
-///   Nhãn tiếng Việt trên form       → BuildBrowserGroup / BuildSearchGroup / BuildCrawlGroup
+///   Nhãn tiếng Việt trên form       → BuildBrowserGroup / BuildSearchGroup
 ///   Validate trước khi chạy         → ReadConfig()
 ///   Bấm Bắt đầu                     → StartAsync()
 /// </summary>
@@ -20,12 +22,19 @@ public sealed class MainForm : Form
     readonly ComboBox _cboBrowser = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     readonly ComboBox _cboProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     readonly Label _lblBrowserStatus = new() { AutoSize = true, ForeColor = Color.DarkSlateGray, Text = "Chọn trình duyệt đã cài trên máy." };
+    readonly TextBox _txtProxy = new() { Dock = DockStyle.Fill };
     readonly TextBox _txtKeywords = Multiline();
     readonly TextBox _txtTargets = Multiline();
     readonly ComboBox _cboMatch = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     // Đổi Value = số trang Google mặc định / delay (ms) mặc định.
     readonly NumericUpDown _numPages = new() { Minimum = 1, Maximum = 20, Value = 3, Dock = DockStyle.Fill };
     readonly NumericUpDown _numDelay = new() { Minimum = 200, Maximum = 20000, Increment = 100, Value = 1500, Dock = DockStyle.Fill };
+    readonly CheckBox _chkAutoRepeat = new()
+    {
+        Text = "Tự động lặp lại khi quét hết từ khóa",
+        Checked = false,
+        AutoSize = true
+    };
     readonly TextBox _txtOutput = new() { Dock = DockStyle.Fill };
     readonly TextBox _txtSelectors = Multiline();
     readonly CheckBox _chkHtml = new() { Text = "Lưu HTML trang", Checked = true, AutoSize = true };
@@ -72,9 +81,15 @@ public sealed class MainForm : Form
         // Thư mục lưu mặc định. Đổi nếu muốn để Desktop hoặc D:\crawl.
         _txtOutput.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "AutoClick", "results");
         // Text mẫu trên form — xóa hoặc đổi thành keyword/link bạn hay dùng.
-        _txtKeywords.Text = "cách làm bánh mì";
+        _txtKeywords.Text = "hakoreview" + Environment.NewLine + "hako" + Environment.NewLine + "bánh mì";
         _txtTargets.Text = "https://www.example.com";
         _txtSelectors.PlaceholderText = "title = h1" + Environment.NewLine + "mota = meta[name='description']";
+        _txtProxy.PlaceholderText = "Để trống = không dùng. Ví dụ: 1.2.3.4:8080 hoặc 1.2.3.4:8080:user:pass";
+        var proxyTip = new ToolTip { AutoPopDelay = 12000, ShowAlways = true };
+        proxyTip.SetToolTip(_txtProxy,
+            "HTTP: host:port hoặc host:port:user:pass\n" +
+            "Hoặc user:pass@host:port\n" +
+            "SOCKS5: socks5://host:port");
 
         _cboBrowser.SelectedIndexChanged += (_, _) => ReloadProfiles();
         Load += (_, _) => InitBrowsers();
@@ -92,9 +107,8 @@ public sealed class MainForm : Form
         };
         stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        stack.Controls.Add(Group("1. Trình duyệt thường", BuildBrowserGroup()));
+        stack.Controls.Add(Group("1. Trình duyệt", BuildBrowserGroup()));
         stack.Controls.Add(Group("2. Tìm kiếm Google", BuildSearchGroup()));
-        stack.Controls.Add(Group("3. Crawl dữ liệu", BuildCrawlGroup()));
         stack.Controls.Add(BuildButtons());
         return stack;
     }
@@ -115,11 +129,13 @@ public sealed class MainForm : Form
 
     Control BuildBrowserGroup()
     {
-        var t = Grid(4);
+        var t = Grid(5);
         t.Controls.Add(Lbl("Trình duyệt"), 0, 0);
         t.Controls.Add(_cboBrowser, 1, 0);
         t.Controls.Add(Lbl("Profile"), 0, 1);
         t.Controls.Add(_cboProfile, 1, 1);
+        t.Controls.Add(Lbl("Proxy"), 0, 2);
+        t.Controls.Add(_txtProxy, 1, 2);
 
         var btnCheck = new Button { Text = "Kiểm tra đang mở?", AutoSize = true };
         var btnClose = new Button { Text = "Đóng trình duyệt", AutoSize = true };
@@ -129,9 +145,9 @@ public sealed class MainForm : Form
         var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
         flow.Controls.Add(btnCheck);
         flow.Controls.Add(btnClose);
-        t.Controls.Add(flow, 1, 2);
+        t.Controls.Add(flow, 1, 3);
         t.SetColumnSpan(_lblBrowserStatus, 2);
-        t.Controls.Add(_lblBrowserStatus, 0, 3);
+        t.Controls.Add(_lblBrowserStatus, 0, 4);
         _lblBrowserStatus.Margin = new Padding(0, 8, 0, 0);
         return t;
     }
@@ -142,9 +158,9 @@ public sealed class MainForm : Form
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        _txtKeywords.Height = 90;
+        _txtKeywords.Height = 120;
         _txtTargets.Height = 90;
-        t.Controls.Add(Lbl("Từ khóa (mỗi dòng 1)"), 0, 0);
+        t.Controls.Add(Lbl("Danh sách từ khóa" + Environment.NewLine + "(mỗi dòng 1, chạy lần lượt)"), 0, 0);
         t.Controls.Add(_txtKeywords, 1, 0);
         t.Controls.Add(Lbl("Link mục tiêu (mỗi dòng 1)"), 0, 1);
         t.Controls.Add(_txtTargets, 1, 1);
@@ -154,34 +170,9 @@ public sealed class MainForm : Form
         t.Controls.Add(_numPages, 1, 3);
         t.Controls.Add(Lbl("Delay giữa thao tác (ms)"), 0, 4);
         t.Controls.Add(_numDelay, 1, 4);
-        return t;
-    }
-
-    Control BuildCrawlGroup()
-    {
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Padding = new Padding(8) };
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-        var browse = new Button { Text = "Chọn...", AutoSize = true };
-        browse.Click += (_, _) => BrowseOutput();
-        var outputRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
-        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        outputRow.Controls.Add(_txtOutput, 0, 0);
-        outputRow.Controls.Add(browse, 1, 0);
-
-        _txtSelectors.Height = 70;
-        t.Controls.Add(Lbl("Thư mục lưu"), 0, 0);
-        t.Controls.Add(outputRow, 1, 0);
-        t.Controls.Add(Lbl("CSS selector (tuỳ chọn)"), 0, 1);
-        t.Controls.Add(_txtSelectors, 1, 1);
-
-        var flags = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
-        flags.Controls.Add(_chkHtml);
-        flags.Controls.Add(_chkCsv);
-        flags.Controls.Add(_chkJson);
-        t.Controls.Add(flags, 1, 2);
+        t.Controls.Add(Lbl("Chế độ chạy"), 0, 5);
+        t.Controls.Add(_chkAutoRepeat, 1, 5);
+        _chkAutoRepeat.Padding = new Padding(0, 6, 0, 0);
         return t;
     }
 
@@ -307,17 +298,6 @@ public sealed class MainForm : Form
         await CheckBrowserAsync();
     }
 
-    void BrowseOutput()
-    {
-        using var d = new FolderBrowserDialog
-        {
-            Description = "Chọn thư mục lưu kết quả",
-            SelectedPath = Directory.Exists(_txtOutput.Text) ? _txtOutput.Text : ""
-        };
-        if (d.ShowDialog(this) == DialogResult.OK)
-            _txtOutput.Text = d.SelectedPath;
-    }
-
     /// <summary>Đọc form → JobConfig. Thêm rule kiểm tra thì viết thêm throw ở đây.</summary>
     JobConfig ReadConfig()
     {
@@ -363,11 +343,14 @@ public sealed class MainForm : Form
         {
             Browser = browser,
             Profile = profile,
+            ScanSite = keywords[0],
             Keywords = keywords,
             TargetLinks = targets,
             MatchMode = mode,
             MaxGooglePages = (int)_numPages.Value,
             DelayMs = (int)_numDelay.Value,
+            AutoRepeat = _chkAutoRepeat.Checked,
+            Proxy = BrowserProxy.Parse(_txtProxy.Text),
             OutputDirectory = output,
             SaveHtml = _chkHtml.Checked,
             SaveCsv = _chkCsv.Checked,
@@ -376,7 +359,7 @@ public sealed class MainForm : Form
         };
     }
 
-    /// <summary>Luồng Bắt đầu: validate → mở Chromium → crawl → hiện kết quả.</summary>
+    /// <summary>Luồng Bắt đầu: validate → mở Chromium → crawl. Gửi key scan chạy ngầm.</summary>
     async Task StartAsync()
     {
         if (_btnStop.Enabled)
@@ -397,16 +380,29 @@ public sealed class MainForm : Form
         _btnStart.Enabled = false;
         _btnStop.Enabled = true;
         _progress.MarqueeAnimationSpeed = 30;
-        SetStatus("Đang chạy...");
+        SetStatus(config.AutoRepeat ? "Đang chạy (tự động lặp lại)..." : "Đang chạy...");
 
         var log = new Progress<string>(AppendLog);
+        BrowserSession? session = null;
         try
         {
-            await using var session = await BrowserLauncher.ConnectOrLaunchAsync(
-                config.Browser, config.Profile, config.DebugPort, log, _cts.Token);
+            ScanApiClient.SendInBackground(config);
+
+            session = await BrowserLauncher.ConnectOrLaunchAsync(
+                config.Browser, config.Profile, config.DebugPort, log, _cts.Token, config.Proxy);
             var (folder, results) = await GoogleCrawlerService.RunAsync(config, session, log, _cts.Token);
-            var found = results.Count(r => r.Found);
             _lastRunFolder = folder;
+            await CloseSessionAsync(session, log);
+            session = null;
+
+            if (_cts.IsCancellationRequested)
+            {
+                AppendLog("Đã dừng theo yêu cầu.");
+                SetStatus("Đã dừng.");
+                return;
+            }
+
+            var found = results.Count(r => r.Found);
             SetStatus($"Xong. Khớp {found}/{results.Count} từ khóa.");
             MessageBox.Show(this, $"Hoàn tất.\nKhớp {found}/{results.Count} từ khóa.\nKết quả: {_lastRunFolder}", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -423,12 +419,27 @@ public sealed class MainForm : Form
         }
         finally
         {
+            if (session != null)
+                await CloseSessionAsync(session, log);
             _btnStart.Enabled = true;
             _btnStop.Enabled = false;
             _progress.MarqueeAnimationSpeed = 0;
             _progress.Value = 0;
             _cts.Dispose();
             _cts = null;
+        }
+    }
+
+    static async Task CloseSessionAsync(BrowserSession session, IProgress<string> log)
+    {
+        try
+        {
+            await session.DisposeAsync();
+            log.Report("Đã đóng trình duyệt.");
+        }
+        catch
+        {
+            // ignore
         }
     }
 

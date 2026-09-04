@@ -9,8 +9,8 @@ using Microsoft.Win32;
 namespace AutoClick.Services;
 
 /// <summary>
-/// Phiên điều khiển 1 cửa sổ Chrome/Edge đã mở.
-/// Dispose chỉ ngắt Playwright + đóng tab do app tạo — KHÔNG tắt trình duyệt của bạn.
+/// Phiên điều khiển cửa sổ trình duyệt do app mở.
+/// Dispose đóng hết tab rồi tắt browser.
 /// </summary>
 public sealed class BrowserSession : IAsyncDisposable
 {
@@ -24,15 +24,60 @@ public sealed class BrowserSession : IAsyncDisposable
     public bool OwnsBrowser { get; init; }
     public List<IPage> OwnedPages { get; } = [];
 
+    int _disposed;
+    int _fullscreenApplied;
+
     public async Task<IPage> NewWorkPageAsync()
     {
         var page = await Context.NewPageAsync();
         OwnedPages.Add(page);
+        await ApplyFullscreenAsync(page);
         return page;
+    }
+
+    /// <summary>Phóng cửa sổ Chromium full màn hình (CDP). Gọi 1 lần cho tab làm việc.</summary>
+    async Task ApplyFullscreenAsync(IPage page)
+    {
+        if (Interlocked.Exchange(ref _fullscreenApplied, 1) == 1)
+            return;
+
+        try
+        {
+            var cdp = await Context.NewCDPSessionAsync(page);
+            var response = await cdp.SendAsync("Browser.getWindowForTarget");
+            if (response is not { } json || json.ValueKind != JsonValueKind.Object)
+                return;
+
+            var windowId = json.GetProperty("windowId").GetInt32();
+            await cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
+            {
+                ["windowId"] = windowId,
+                ["bounds"] = new Dictionary<string, object>
+                {
+                    ["windowState"] = "fullscreen"
+                }
+            });
+            try { await cdp.DetachAsync(); } catch { /* ignore */ }
+        }
+        catch
+        {
+            try
+            {
+                await page.EvaluateAsync(
+                    "() => { window.moveTo(0, 0); window.resizeTo(screen.width, screen.height); }");
+            }
+            catch
+            {
+                // ignore
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+            return;
+
         foreach (var page in OwnedPages)
         {
             try
@@ -46,9 +91,17 @@ public sealed class BrowserSession : IAsyncDisposable
             }
         }
 
-        if (OwnsBrowser)
+        try { await Context.CloseAsync(); } catch { /* đã đóng */ }
+        try { await Browser.CloseAsync(); } catch { /* tắt cửa sổ Chromium */ }
+
+        try
         {
-            try { await Browser.CloseAsync(); } catch { /* Chromium do app mở */ }
+            if (LaunchedProcess is { HasExited: false })
+                LaunchedProcess.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // ignore
         }
 
         try
@@ -57,7 +110,7 @@ public sealed class BrowserSession : IAsyncDisposable
         }
         catch
         {
-            // CDP: chỉ ngắt kết nối, không Browser.CloseAsync() (sẽ tắt cả Chrome user).
+            // ignore
         }
     }
 }
@@ -72,7 +125,7 @@ public sealed class BrowserSession : IAsyncDisposable
 /// Chỗ hay sửa:
 ///   DefaultDebugPort     — cổng CDP
 ///   DetectInstalled()    — thêm đường dẫn chrome.exe nếu máy cài lệch chỗ
-///   ConnectOrLaunchAsync — thêm/bớt argument Chrome
+///   ConnectOrLaunchAsync — thêm/bớt argument Chrome; proxy từ form
 /// </summary>
 public static class BrowserLauncher
 {
@@ -279,33 +332,38 @@ public static class BrowserLauncher
         BrowserProfileInfo profile,
         int preferredPort,
         IProgress<string> log,
-        CancellationToken ct)
+        CancellationToken ct,
+        BrowserProxy? proxy = null)
     {
         _ = (browser, profile, preferredPort); // giữ chữ ký để bật lại Chrome thật cho dễ
 
         // --- Cách cũ: Chrome/Edge thật + profile hàng ngày (phải đóng Chrome trước) ---
-        // return await ConnectOrLaunchSystemChromeAsync(browser, profile, preferredPort, log, ct);
+        // return await ConnectOrLaunchSystemChromeAsync(browser, profile, preferredPort, log, ct, proxy);
 
-        return await LaunchPlaywrightChromiumAsync(log, ct);
+        return await LaunchPlaywrightChromiumAsync(log, ct, proxy);
     }
 
     /// <summary>Mở cửa sổ Chromium đi kèm Playwright (không dùng Chrome trên máy).</summary>
-    static async Task<BrowserSession> LaunchPlaywrightChromiumAsync(IProgress<string> log, CancellationToken ct)
+    static async Task<BrowserSession> LaunchPlaywrightChromiumAsync(
+        IProgress<string> log,
+        CancellationToken ct,
+        BrowserProxy? proxy)
     {
         ct.ThrowIfCancellationRequested();
         log.Report("Mở Playwright Chromium (không dùng Chrome/Edge trên máy)...");
+        LogProxy(log, proxy);
 
         var playwright = await Playwright.CreateAsync();
         IBrowser browser;
         try
         {
-            browser = await playwright.Chromium.LaunchAsync(ChromiumLaunchOptions());
+            browser = await playwright.Chromium.LaunchAsync(ChromiumLaunchOptions(proxy));
         }
         catch (PlaywrightException ex) when (ex.Message.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase))
         {
             log.Report("Chưa có Chromium — đang tải (lần đầu có thể mất vài phút)...");
             Microsoft.Playwright.Program.Main(["install", "chromium"]);
-            browser = await playwright.Chromium.LaunchAsync(ChromiumLaunchOptions());
+            browser = await playwright.Chromium.LaunchAsync(ChromiumLaunchOptions(proxy));
         }
 
         var context = await browser.NewContextAsync(new BrowserNewContextOptions
@@ -327,16 +385,32 @@ public static class BrowserLauncher
         };
     }
 
-    static BrowserTypeLaunchOptions ChromiumLaunchOptions() => new()
+    static BrowserTypeLaunchOptions ChromiumLaunchOptions(BrowserProxy? proxy)
     {
-        Headless = false, // true = chạy ẩn, không thấy cửa sổ
-        SlowMo = 80, // chậm thao tác Playwright một chút cho dễ nhìn
-        Args =
-        [
-            "--disable-blink-features=AutomationControlled",
-            "--start-maximized"
-        ]
-    };
+        var options = new BrowserTypeLaunchOptions
+        {
+            Headless = false, // true = chạy ẩn, không thấy cửa sổ
+            SlowMo = 80, // chậm thao tác Playwright một chút cho dễ nhìn
+            Args =
+            [
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+                "--start-fullscreen"
+            ]
+        };
+        if (proxy != null)
+        {
+            options.Proxy = new Proxy
+            {
+                Server = proxy.Server,
+                Bypass = "localhost,127.0.0.1",
+                Username = proxy.Username,
+                Password = proxy.Password
+            };
+        }
+
+        return options;
+    }
 
     /// <summary>Cách cũ — mở chrome.exe / msedge.exe với User Data thật qua CDP.</summary>
     static async Task<BrowserSession> ConnectOrLaunchSystemChromeAsync(
@@ -344,12 +418,15 @@ public static class BrowserLauncher
         BrowserProfileInfo profile,
         int preferredPort,
         IProgress<string> log,
-        CancellationToken ct)
+        CancellationToken ct,
+        BrowserProxy? proxy)
     {
         var port = preferredPort > 0 ? preferredPort : DefaultDebugPort;
 
         if (await IsCdpAliveAsync(port))
         {
+            if (proxy != null)
+                log.Report("Đang kết nối trình duyệt đã mở — proxy trên form không áp dụng cho phiên này.");
             log.Report($"Kết nối lại Chrome/Edge đang mở (CDP port {port})...");
             return await ConnectAsync(port, connectedToExisting: true, launched: null, ct);
         }
@@ -368,12 +445,14 @@ public static class BrowserLauncher
 
         port = GetFreePort(port);
         log.Report($"Mở {browser.Kind} — profile {profile.DisplayName} (port {port})...");
+        LogProxy(log, proxy);
 
         // Các cờ Chrome — bớt/thêm ở đây nếu cần.
         // --remote-debugging-port : để Playwright điều khiển
         // --user-data-dir         : đúng profile hàng ngày (cookie, login Google)
         // --profile-directory     : Default / Profile 1 / ...
-        var args = string.Join(" ",
+        var argList = new List<string>
+        {
             $"--remote-debugging-port={port}",
             "--remote-allow-origins=*",
             Quote($"--user-data-dir={browser.UserDataDir}"),
@@ -381,7 +460,19 @@ public static class BrowserLauncher
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
-            "--new-window");
+            "--new-window",
+            "--start-maximized",
+            "--start-fullscreen"
+        };
+        if (proxy != null)
+        {
+            argList.Add(Quote($"--proxy-server={proxy.Server}"));
+            argList.Add("--proxy-bypass-list=localhost;127.0.0.1;<-loopback>");
+            if (proxy.HasAuth)
+                log.Report("Chrome/Edge không gửi user/pass proxy qua --proxy-server. Nên dùng Playwright Chromium khi proxy có xác thực.");
+        }
+
+        var args = string.Join(" ", argList);
 
         var psi = new ProcessStartInfo
         {
@@ -434,6 +525,13 @@ public static class BrowserLauncher
             ConnectedToExisting = connectedToExisting,
             OwnsBrowser = false
         };
+    }
+
+    static void LogProxy(IProgress<string> log, BrowserProxy? proxy)
+    {
+        if (proxy == null)
+            return;
+        log.Report("Proxy: " + proxy.HostPort + (proxy.HasAuth ? " (có user/pass)" : ""));
     }
 
     static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
