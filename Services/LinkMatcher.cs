@@ -34,6 +34,34 @@ public static class LinkMatcher
     public static string? FindMatch(IEnumerable<string> resultUrls, IEnumerable<string> targets, MatchMode mode)
         => resultUrls.FirstOrDefault(url => MatchesAny(url, targets, mode));
 
+    /// <summary>
+    /// Mỗi URL SERP khớp tối đa 1 lần; mỗi target còn lại chỉ được lấy URL đầu tiên thấy trên trang.
+    /// </summary>
+    public static List<string> FindMatches(
+        IEnumerable<string> resultUrls,
+        IEnumerable<string> remainingTargets,
+        MatchMode mode)
+    {
+        var remaining = remainingTargets.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        var matches = new List<string>();
+        foreach (var url in resultUrls)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                continue;
+            var hits = remaining.Where(t => IsMatch(url, t, mode)).ToList();
+            if (hits.Count == 0)
+                continue;
+            matches.Add(url);
+            foreach (var hit in hits)
+                remaining.Remove(hit);
+        }
+
+        return matches;
+    }
+
+    public static void RemoveHitTargets(List<string> remaining, string url, MatchMode mode)
+        => remaining.RemoveAll(t => IsMatch(url, t, mode));
+
     /// <summary>Contains: bỏ http/www rồi xem chuỗi này có nằm trong chuỗi kia.</summary>
     static bool ContainsMatch(string resultUrl, string target)
     {

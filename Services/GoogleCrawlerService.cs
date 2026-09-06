@@ -11,7 +11,7 @@ namespace AutoClick.Services;
 ///   ExtractResultUrlsAsync    — CSS lấy link organic + quảng cáo (Google hay đổi)
 ///   GoNextGooglePageAsync     — nút trang sau
 ///   WaitForCaptchaIfNeededAsync — thời gian đợi giải CAPTCHA (mặc định 2 phút)
-///   ProcessKeywordAsync       — cắt text 20000 ký tự, timeout selector
+///   ProcessKeywordAsync       — mỗi từ khóa vào hết các link mục tiêu thấy trên Google
 ///   RunAsync                  — hết bộ từ khóa thì đổi proxy (mở lại trình duyệt)
 ///   VisibleMouse / OsMouse    — kéo con trỏ Windows rồi click (thấy kim chuột)
 /// </summary>
@@ -75,20 +75,22 @@ public static class GoogleCrawlerService
                     log.Report(UseRoundLabel(config, rotateProxies)
                         ? $"Lượt {round} — từ khóa {index}/{total}: {keyword}"
                         : $"Từ khóa {index}/{total}: {keyword}");
-                    var item = await ProcessKeywordAsync(page, session, keyword, config, log, ct);
-                    if (config.SaveHtml && item.Found)
-                        ResultWriter.WriteHtml(runFolder, item);
-                    item.Html = null; // bỏ HTML khỏi RAM sau khi đã ghi file
-                    results.Add(item);
+                    var items = await ProcessKeywordAsync(page, session, keyword, config, log, ct);
+                    foreach (var item in items)
+                    {
+                        if (config.SaveHtml && item.Found)
+                            ResultWriter.WriteHtml(runFolder, item);
+                        item.Html = null;
+                        results.Add(item);
+                    }
                     await DelayAsync(config, ct);
                 }
 
                 FlushResults();
                 if (UseRoundLabel(config, rotateProxies))
                 {
-                    var roundCount = results.Count - roundStart;
                     var foundThisRound = results.Skip(roundStart).Count(r => r.Found);
-                    log.Report($"Xong lượt {round}. Khớp {foundThisRound}/{roundCount} từ khóa.");
+                    log.Report($"Xong lượt {round}. Khớp {foundThisRound} link / {total} từ khóa.");
                 }
 
                 if (!ShouldContinue(config, rotateProxies, round, proxySlots.Count))
@@ -186,8 +188,8 @@ public static class GoogleCrawlerService
         return page;
     }
 
-    /// <summary>1 từ khóa: search → khớp → click → crawl → cuộn cuối trang → chờ 2s → back.</summary>
-    static async Task<CrawlResult> ProcessKeywordAsync(
+    /// <summary>1 từ khóa: search → vào từng link mục tiêu thấy trên Google → crawl → back → tiếp.</summary>
+    static async Task<List<CrawlResult>> ProcessKeywordAsync(
         IPage page,
         BrowserSession session,
         string keyword,
@@ -195,70 +197,44 @@ public static class GoogleCrawlerService
         IProgress<string> log,
         CancellationToken ct)
     {
+        var items = new List<CrawlResult>();
         try
         {
             await OpenGoogleSearchAsync(page, keyword, config, log, ct);
             if (await WaitForCaptchaIfNeededAsync(page, log, ct))
             {
-                return new CrawlResult
+                items.Add(new CrawlResult
                 {
                     Keyword = keyword,
                     Found = false,
                     Error = "Google hiện CAPTCHA và hết thời gian chờ."
-                };
+                });
+                return items;
             }
 
-            var matched = config.BouncePageRetry
-                ? await FindMatchWithBounceAsync(page, keyword, config, log, ct)
-                : await FindMatchOnPagesAsync(page, config, log, ct);
+            var remaining = config.TargetLinks.ToList();
+            log.Report($"  Cần tìm {remaining.Count} link mục tiêu.");
+            if (config.BouncePageRetry)
+                await VisitMatchesWithBounceAsync(page, session, keyword, remaining, items, config, log, ct);
+            else
+                await VisitMatchesOnPagesAsync(page, session, remaining, items, keyword, config, log, ct);
 
-            if (matched == null)
+            if (items.Count == 0)
             {
-                log.Report("  Bỏ qua từ khóa này, chuyển từ khóa tiếp theo.");
-                return new CrawlResult
+                log.Report("  Không thấy link mục tiêu nào, chuyển từ khóa tiếp theo.");
+                items.Add(new CrawlResult
                 {
                     Keyword = keyword,
                     Found = false,
                     Error = "Không tìm thấy link khớp trong kết quả Google."
-                };
+                });
+            }
+            else if (remaining.Count > 0)
+            {
+                log.Report("  Còn link mục tiêu chưa thấy: " + string.Join(", ", remaining));
             }
 
-            var targetPage = await OpenMatchedAsync(page, session, matched, config, log, ct);
-            await DelayAsync(config, ct);
-
-            var title = await targetPage.TitleAsync();
-            var text = await SafeInnerTextAsync(targetPage);
-            var html = config.SaveHtml ? await targetPage.ContentAsync() : null;
-            var result = new CrawlResult
-            {
-                Keyword = keyword,
-                Found = true,
-                MatchedUrl = matched,
-                FinalUrl = targetPage.Url,
-                Title = title,
-                Text = Truncate(text, 20000), // tăng số này nếu cần lưu text dài hơn
-                Html = html
-            };
-
-            foreach (var field in config.Selectors)
-            {
-                try
-                {
-                    var loc = targetPage.Locator(field.Selector).First;
-                    var count = await loc.CountAsync();
-                    result.Fields[field.Name] = count == 0 ? "" : (await loc.InnerTextAsync(new() { Timeout = 5000 })).Trim();
-                }
-                catch (Exception ex)
-                {
-                    result.Fields[field.Name] = "";
-                    log.Report($"  Selector '{field.Name}' lỗi: {ex.Message}");
-                }
-            }
-
-            log.Report("  Title: " + Truncate(title, 120));
-            await ScrollToBottomAndWaitAsync(targetPage, log, ct);
-            await GoBackAfterVisitAsync(targetPage, page, session, log, ct);
-            return result;
+            return items;
         }
         catch (OperationCanceledException)
         {
@@ -267,13 +243,65 @@ public static class GoogleCrawlerService
         catch (Exception ex)
         {
             log.Report("Lỗi: " + ex.Message);
-            return new CrawlResult
+            if (items.Count == 0)
             {
-                Keyword = keyword,
-                Found = false,
-                Error = ex.Message
-            };
+                items.Add(new CrawlResult
+                {
+                    Keyword = keyword,
+                    Found = false,
+                    Error = ex.Message
+                });
+            }
+
+            return items;
         }
+    }
+
+    static async Task<CrawlResult> CrawlMatchedAsync(
+        IPage searchPage,
+        BrowserSession session,
+        string keyword,
+        string matched,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        var targetPage = await OpenMatchedAsync(searchPage, session, matched, config, log, ct);
+        await DelayAsync(config, ct);
+
+        var title = await targetPage.TitleAsync();
+        var text = await SafeInnerTextAsync(targetPage);
+        var html = config.SaveHtml ? await targetPage.ContentAsync() : null;
+        var result = new CrawlResult
+        {
+            Keyword = keyword,
+            Found = true,
+            MatchedUrl = matched,
+            FinalUrl = targetPage.Url,
+            Title = title,
+            Text = Truncate(text, 20000),
+            Html = html
+        };
+
+        foreach (var field in config.Selectors)
+        {
+            try
+            {
+                var loc = targetPage.Locator(field.Selector).First;
+                var count = await loc.CountAsync();
+                result.Fields[field.Name] = count == 0 ? "" : (await loc.InnerTextAsync(new() { Timeout = 5000 })).Trim();
+            }
+            catch (Exception ex)
+            {
+                result.Fields[field.Name] = "";
+                log.Report($"  Selector '{field.Name}' lỗi: {ex.Message}");
+            }
+        }
+
+        log.Report("  Title: " + Truncate(title, 120));
+        await ScrollToBottomAndWaitAsync(targetPage, log, ct);
+        await GoBackAfterVisitAsync(targetPage, searchPage, session, log, ct);
+        return result;
     }
 
     /// <summary>Mở google.com, tắt cookie banner nếu có, gõ từ khóa rồi Enter.</summary>
@@ -472,19 +500,23 @@ public static class GoogleCrawlerService
         return urls.Select(LinkMatcher.UnwrapGoogleHref).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    static async Task<string?> FindMatchOnPagesAsync(
+    static async Task VisitMatchesOnPagesAsync(
         IPage page,
+        BrowserSession session,
+        List<string> remaining,
+        List<CrawlResult> items,
+        string keyword,
         JobConfig config,
         IProgress<string> log,
         CancellationToken ct)
     {
-        for (var googlePage = 1; googlePage <= config.MaxGooglePages; googlePage++)
+        for (var googlePage = 1; googlePage <= config.MaxGooglePages && remaining.Count > 0; googlePage++)
         {
             ct.ThrowIfCancellationRequested();
-            var matched = await ScanCurrentGooglePageAsync(page, googlePage, config.MaxGooglePages, config, log, ct);
-            if (matched != null)
-                return matched;
-
+            await VisitMatchesOnCurrentPageAsync(
+                page, session, keyword, remaining, items, googlePage, config.MaxGooglePages, config, log, ct);
+            if (remaining.Count == 0)
+                return;
             if (googlePage < config.MaxGooglePages)
             {
                 var moved = await GoNextGooglePageAsync(page, config, log, ct);
@@ -495,54 +527,83 @@ public static class GoogleCrawlerService
                 }
             }
         }
-
-        return null;
     }
 
-    /// <summary>Trang 1 → trang 2 → tìm lại trang 1. Hết thì thôi.</summary>
-    static async Task<string?> FindMatchWithBounceAsync(
+    /// <summary>Trang 1 → trang 2 → lại trang 1. Mỗi trang vào hết link mục tiêu còn lại rồi mới sang trang.</summary>
+    static async Task VisitMatchesWithBounceAsync(
         IPage page,
+        BrowserSession session,
         string keyword,
+        List<string> remaining,
+        List<CrawlResult> items,
         JobConfig config,
         IProgress<string> log,
         CancellationToken ct)
     {
         log.Report("Luồng trang 1 → 2 → lại trang 1.");
-        var matched = await ScanCurrentGooglePageAsync(page, 1, 2, config, log, ct);
-        if (matched != null)
-            return matched;
+        await VisitMatchesOnCurrentPageAsync(page, session, keyword, remaining, items, 1, 2, config, log, ct);
+        if (remaining.Count == 0)
+            return;
 
-        log.Report("  Trang 1 chưa khớp — click sang trang 2...");
+        log.Report("  Còn link mục tiêu — click sang trang 2...");
         if (!await GoNextGooglePageAsync(page, config, log, ct))
         {
             log.Report("  Không sang được trang 2.");
-            return null;
+            return;
         }
 
-        matched = await ScanCurrentGooglePageAsync(page, 2, 2, config, log, ct);
-        if (matched != null)
-            return matched;
+        await VisitMatchesOnCurrentPageAsync(page, session, keyword, remaining, items, 2, 2, config, log, ct);
+        if (remaining.Count == 0)
+            return;
 
-        log.Report("  Trang 2 chưa khớp — click lại trang 1 và tìm kiếm lại...");
+        log.Report("  Còn link mục tiêu — về trang 1 tìm lại...");
         if (!await GoPrevGooglePageAsync(page, config, log, ct))
             log.Report("  Không click được về trang 1 — mở lại ô tìm kiếm.");
 
         await OpenGoogleSearchAsync(page, keyword, config, log, ct);
         if (await WaitForCaptchaIfNeededAsync(page, log, ct))
-            return null;
+            return;
 
-        return await ScanCurrentGooglePageAsync(page, 1, 2, config, log, ct);
+        await VisitMatchesOnCurrentPageAsync(page, session, keyword, remaining, items, 1, 2, config, log, ct);
     }
 
-    static async Task<string?> ScanCurrentGooglePageAsync(
+    static async Task VisitMatchesOnCurrentPageAsync(
         IPage page,
+        BrowserSession session,
+        string keyword,
+        List<string> remaining,
+        List<CrawlResult> items,
         int googlePage,
         int maxPages,
         JobConfig config,
         IProgress<string> log,
         CancellationToken ct)
     {
-        log.Report($"Quét trang Google {googlePage}/{maxPages}...");
+        var matches = await ListMatchesOnCurrentPageAsync(page, googlePage, maxPages, remaining, config, log, ct);
+        var totalTargets = config.TargetLinks.Count;
+        foreach (var matched in matches)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!remaining.Any(t => LinkMatcher.IsMatch(matched, t, config.MatchMode)))
+                continue;
+            log.Report($"  Vào link mục tiêu ({items.Count + 1}/{totalTargets}): {matched}");
+            var item = await CrawlMatchedAsync(page, session, keyword, matched, config, log, ct);
+            items.Add(item);
+            LinkMatcher.RemoveHitTargets(remaining, matched, config.MatchMode);
+            await DelayAsync(config, ct);
+        }
+    }
+
+    static async Task<List<string>> ListMatchesOnCurrentPageAsync(
+        IPage page,
+        int googlePage,
+        int maxPages,
+        IReadOnlyList<string> remaining,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        log.Report($"Quét trang Google {googlePage}/{maxPages} (còn {remaining.Count} link mục tiêu)...");
         await DelayAsync(config, ct);
 
         var urls = await ExtractResultUrlsAsync(page);
@@ -550,23 +611,25 @@ public static class GoogleCrawlerService
         foreach (var sample in urls.Take(8))
             log.Report("    • " + sample);
 
-        var matched = LinkMatcher.FindMatch(urls, config.TargetLinks, config.MatchMode);
-        if (matched != null)
+        var matches = LinkMatcher.FindMatches(urls, remaining, config.MatchMode);
+        if (matches.Count > 0)
         {
-            log.Report("  Khớp: " + matched);
-            return matched;
+            log.Report($"  Khớp {matches.Count} link mục tiêu trên trang này.");
+            foreach (var url in matches)
+                log.Report("    → " + url);
+            return matches;
         }
 
         if (urls.Count == 0)
             log.Report("  Chưa lấy được organic link. URL hiện tại: " + page.Url);
         else
         {
-            var targetHosts = string.Join(", ", config.TargetLinks.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct());
+            var targetHosts = string.Join(", ", remaining.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct());
             var serps = string.Join(", ", urls.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct().Take(12));
-            log.Report($"  Chưa khớp. Target host: [{targetHosts}] | Host trên Google: [{serps}]");
+            log.Report($"  Chưa khớp. Target còn lại: [{targetHosts}] | Host trên Google: [{serps}]");
         }
 
-        return null;
+        return matches;
     }
 
     /// <summary>Bấm Next trên Google. Thêm aria-label nếu giao diện máy bạn khác.</summary>
@@ -1022,7 +1085,7 @@ public static class GoogleCrawlerService
     /// <summary>Back về Google. Đóng mọi tab đích đã mở; cùng tab thì GoBack.</summary>
     static async Task GoBackAfterVisitAsync(IPage targetPage, IPage searchPage, BrowserSession session, IProgress<string> log, CancellationToken ct)
     {
-        log.Report("  Back về Google, chuẩn bị từ khóa tiếp theo...");
+        log.Report("  Back về Google, tiếp tục link mục tiêu / từ khóa tiếp theo...");
         try
         {
             var extras = session.OwnedPages

@@ -17,7 +17,6 @@ namespace AutoClick;
 ///   Proxy trình duyệt (mỗi dòng 1)  → _txtProxy.Text
 ///   Thư mục lưu mặc định            → _txtOutput.Text
 ///   Nhãn tiếng Việt trên form       → BuildBrowserGroup / BuildSearchGroup
-///   Site gửi lên scan               → _txtScanSite.Text
 ///   Validate trước khi chạy         → ReadConfig()
 ///   Bấm Bắt đầu                     → StartAsync() (gửi scan rồi crawl)
 /// </summary>
@@ -26,9 +25,7 @@ public sealed class MainForm : Form
     readonly ComboBox _cboBrowser = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     readonly TextBox _txtProxy = Multiline();
     readonly TextBox _txtKeywords = Multiline();
-    readonly TextBox _txtScanSite = new() { Dock = DockStyle.Fill };
     readonly TextBox _txtTargets = Multiline();
-    bool _scanSiteManual;
     // Đổi Value = số trang Google mặc định / delay (ms) mặc định.
     readonly NumericUpDown _numPages = new() { Minimum = 1, Maximum = 20, Value = 3, Dock = DockStyle.Fill };
     readonly NumericUpDown _numDelay = new() { Minimum = 200, Maximum = 20000, Increment = 100, Value = 1500, Dock = DockStyle.Fill };
@@ -115,28 +112,17 @@ public sealed class MainForm : Form
             "Tắt: mở cửa sổ như bình thường.");
         proxyTip.SetToolTip(_chkBouncePages,
             "Bật: trang 1 không khớp → sang trang 2 → click lại trang 1 và tìm lại.\n" +
-            "Vẫn không có thì sang từ khóa tiếp theo. Không dùng ô số trang tối đa.");
+            "Vẫn còn link mục tiêu thì sang từ khóa tiếp theo. Không dùng ô số trang tối đa.");
         proxyTip.SetToolTip(_numNewTabs,
             "Khi khớp link mục tiêu: click bấy nhiêu lần, mỗi lần mở 1 tab mới.");
-        proxyTip.SetToolTip(_txtScanSite,
-            "Tên site trên scan.thuoc360.com (chữ thường, số, gạch ngang).\n" +
-            "Từ khóa có dấu cách không gửi được — điền site hoặc để trống để lấy từ domain mục tiêu.\n" +
-            "Bấm Bắt đầu sẽ lưu form máy này và gửi báo cáo lên scan.");
+        proxyTip.SetToolTip(_txtTargets,
+            "Mỗi dòng 1 link/domain. Một từ khóa sẽ vào lần lượt mọi link mục tiêu thấy trên Google.");
         _chkBouncePages.CheckedChanged += (_, _) => _numPages.Enabled = !_chkBouncePages.Checked;
-        _txtScanSite.PlaceholderText = "vd. brandchoicereview — để trống sẽ lấy từ domain mục tiêu";
-        _txtScanSite.TextChanged += (_, _) =>
-        {
-            if (_txtScanSite.Focused)
-                _scanSiteManual = _txtScanSite.Text.Trim().Length > 0;
-        };
-        _txtKeywords.Leave += (_, _) => SuggestScanSiteIfNeeded();
-        _txtTargets.Leave += (_, _) => SuggestScanSiteIfNeeded();
 
         Load += (_, _) =>
         {
             InitBrowsers();
             RestoreForm();
-            SuggestScanSiteIfNeeded();
         };
         FormClosing += (_, _) =>
         {
@@ -197,17 +183,15 @@ public sealed class MainForm : Form
         _txtTargets.Height = 90;
         t.Controls.Add(Lbl("Danh sách từ khóa" + Environment.NewLine + "(mỗi dòng 1, chạy lần lượt)"), 0, 0);
         t.Controls.Add(_txtKeywords, 1, 0);
-        t.Controls.Add(Lbl("Site trên scan"), 0, 1);
-        t.Controls.Add(_txtScanSite, 1, 1);
-        t.Controls.Add(Lbl("Link mục tiêu (mỗi dòng 1)"), 0, 2);
-        t.Controls.Add(_txtTargets, 1, 2);
-        t.Controls.Add(Lbl("Số trang Google tối đa"), 0, 3);
-        t.Controls.Add(_numPages, 1, 3);
-        t.Controls.Add(Lbl("Delay giữa thao tác (ms)"), 0, 4);
-        t.Controls.Add(_numDelay, 1, 4);
-        t.Controls.Add(Lbl("Số lần click mở tab mới"), 0, 5);
-        t.Controls.Add(_numNewTabs, 1, 5);
-        t.Controls.Add(Lbl("Chế độ chạy"), 0, 6);
+        t.Controls.Add(Lbl("Link mục tiêu (mỗi dòng 1)"), 0, 1);
+        t.Controls.Add(_txtTargets, 1, 1);
+        t.Controls.Add(Lbl("Số trang Google tối đa"), 0, 2);
+        t.Controls.Add(_numPages, 1, 2);
+        t.Controls.Add(Lbl("Delay giữa thao tác (ms)"), 0, 3);
+        t.Controls.Add(_numDelay, 1, 3);
+        t.Controls.Add(Lbl("Số lần click mở tab mới"), 0, 4);
+        t.Controls.Add(_numNewTabs, 1, 4);
+        t.Controls.Add(Lbl("Chế độ chạy"), 0, 5);
         var modes = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -219,7 +203,7 @@ public sealed class MainForm : Form
         modes.Controls.Add(_chkAutoRepeat);
         modes.Controls.Add(_chkHeadless);
         modes.Controls.Add(_chkBouncePages);
-        t.Controls.Add(modes, 1, 6);
+        t.Controls.Add(modes, 1, 5);
         return t;
     }
 
@@ -325,9 +309,9 @@ public sealed class MainForm : Form
         {
             Browser = browser,
             Profile = profile,
-            ScanSite = ScanApiClient.SuggestScanSite(_txtScanSite.Text, keywords, targets)
+            ScanSite = ScanApiClient.SuggestScanSite(null, keywords, targets)
                        ?? throw new InvalidOperationException(
-                           "Điền Site trên scan (vd. brandchoicereview). Từ khóa có dấu cách không dùng làm site được."),
+                           "Không tạo được site scan từ từ khóa / domain mục tiêu."),
             Keywords = keywords,
             TargetLinks = targets,
             MatchMode = MatchMode.Contains,
@@ -445,18 +429,6 @@ public sealed class MainForm : Form
         }
     }
 
-    void SuggestScanSiteIfNeeded()
-    {
-        if (_scanSiteManual)
-            return;
-        var suggested = ScanApiClient.SuggestScanSite(
-            null,
-            Lines(_txtKeywords.Text),
-            Lines(_txtTargets.Text));
-        if (!string.IsNullOrWhiteSpace(suggested))
-            _txtScanSite.Text = suggested;
-    }
-
     void PersistForm()
     {
         try
@@ -467,7 +439,6 @@ public sealed class MainForm : Form
             s.Proxy = _txtProxy.Text;
             s.Keywords = _txtKeywords.Text;
             s.Targets = _txtTargets.Text;
-            s.ScanSite = _txtScanSite.Text.Trim();
             s.MaxGooglePages = (int)_numPages.Value;
             s.DelayMs = (int)_numDelay.Value;
             s.OpenNewTabClicks = (int)_numNewTabs.Value;
@@ -494,11 +465,6 @@ public sealed class MainForm : Form
             _txtKeywords.Text = s.Keywords;
         if (!string.IsNullOrWhiteSpace(s.Targets))
             _txtTargets.Text = s.Targets;
-        if (!string.IsNullOrWhiteSpace(s.ScanSite))
-        {
-            _txtScanSite.Text = s.ScanSite;
-            _scanSiteManual = true;
-        }
         if (s.MaxGooglePages >= _numPages.Minimum && s.MaxGooglePages <= _numPages.Maximum)
             _numPages.Value = s.MaxGooglePages;
         if (s.DelayMs >= _numDelay.Minimum && s.DelayMs <= _numDelay.Maximum)
