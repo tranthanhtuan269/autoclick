@@ -80,9 +80,9 @@ public static class VisibleMouse
                 return await ClickByJsFallbackAsync(page, loc, log, ct, ctrlClick);
 
             if (ctrlClick)
-                await OsMouse.MoveSmoothAndCtrlClickAsync(_lastScreenX, _lastScreenY, ct);
+                await OsMouse.CtrlClickHereAsync(ct);
             else
-                await OsMouse.MoveSmoothAndClickAsync(_lastScreenX, _lastScreenY, ct);
+                await OsMouse.ClickHereAsync(ct);
             return true;
         }
         catch (Exception ex)

@@ -35,13 +35,19 @@ public static class OsMouse
         public int Y;
     }
 
-    /// <summary>Kéo con trỏ từ vị trí hiện tại tới (x,y), chưa click.</summary>
+    /// <summary>Kéo con trỏ từ vị trí hiện tại tới (x,y), chưa click. Đã gần đích thì đứng yên.</summary>
     public static async Task MoveSmoothAsync(int x, int y, CancellationToken ct)
     {
         EnsureCursorVisible();
 
         if (!GetCursorPos(out var start))
             start = new PointApi { X = x, Y = y };
+
+        if (Math.Abs(start.X - x) <= 12 && Math.Abs(start.Y - y) <= 12)
+        {
+            SetCursorPos(x, y);
+            return;
+        }
 
         const int steps = 28;
         for (var i = 1; i <= steps; i++)
@@ -68,6 +74,17 @@ public static class OsMouse
     public static async Task MoveSmoothAndCtrlClickAsync(int x, int y, CancellationToken ct)
     {
         await MoveSmoothAsync(x, y, ct);
+        await CtrlClickHereAsync(ct);
+    }
+
+    /// <summary>Click trái tại chỗ, không kéo chuột.</summary>
+    public static Task ClickHereAsync(CancellationToken ct)
+        => LeftClickAsync(ct);
+
+    /// <summary>Ctrl+click tại chỗ — lần click 2, 3... cùng một link đích.</summary>
+    public static async Task CtrlClickHereAsync(CancellationToken ct)
+    {
+        EnsureCursorVisible();
         keybd_event(VkControl, 0, 0, UIntPtr.Zero);
         await Task.Delay(30, ct);
         try

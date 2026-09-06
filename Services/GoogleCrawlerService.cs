@@ -716,8 +716,14 @@ public static class GoogleCrawlerService
                 await EnsureSearchPageAsync(page, log, ct);
                 await page.BringToFrontAsync();
 
-                markedDest = await MarkMatchedLinkAsync(page, matched);
                 var loc = page.Locator("a[data-autoclick-target='1']").First;
+                var alreadyMarked = await loc.CountAsync() > 0;
+                if (!alreadyMarked)
+                {
+                    markedDest = await MarkMatchedLinkAsync(page, matched);
+                    loc = page.Locator("a[data-autoclick-target='1']").First;
+                }
+
                 if (string.IsNullOrWhiteSpace(markedDest) || await loc.CountAsync() == 0)
                 {
                     log.Report("  Không thấy thẻ đích, mở tab trực tiếp.");
@@ -728,8 +734,11 @@ public static class GoogleCrawlerService
                 }
 
                 var before = opened.Count;
-                log.Report($"  Click đích {i}/{clicks}: {markedDest}");
-                await ClickOpenNewTabAsync(page, loc, config, log, ct);
+                var moveMouse = i == 1 || !alreadyMarked;
+                log.Report(moveMouse
+                    ? $"  Click đích {i}/{clicks}: {markedDest}"
+                    : $"  Click lại tại chỗ {i}/{clicks}: {markedDest}");
+                await ClickOpenNewTabAsync(page, loc, config, log, ct, moveMouse);
 
                 var got = await WaitForNewTabAsync(opened, before, 5000, ct);
                 if (!got)
@@ -912,15 +921,35 @@ public static class GoogleCrawlerService
             return bestDest || unwrap(best.href || '');
         }", matched) ?? "";
 
-    static async Task ClickOpenNewTabAsync(IPage page, ILocator loc, JobConfig config, IProgress<string> log, CancellationToken ct)
+    static async Task ClickOpenNewTabAsync(
+        IPage page,
+        ILocator loc,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct,
+        bool moveMouse = true)
     {
-        if (!config.Headless)
+        if (config.Headless)
         {
-            try { await VisibleMouse.MoveToAsync(page, loc, log, ct); }
-            catch { /* vẫn click Playwright trên đúng thẻ */ }
+            await ClickTargetWithPlaywrightAsync(loc, log);
+            return;
         }
 
-        await ClickTargetWithPlaywrightAsync(loc, log);
+        if (moveMouse)
+        {
+            try { await VisibleMouse.MoveToAsync(page, loc, log, ct); }
+            catch { /* vẫn click tại chỗ */ }
+        }
+
+        try
+        {
+            await OsMouse.CtrlClickHereAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            log.Report("    Ctrl+click tại chỗ lỗi: " + ex.Message);
+            await ClickTargetWithPlaywrightAsync(loc, log);
+        }
     }
 
     static async Task ClickTargetWithPlaywrightAsync(ILocator loc, IProgress<string> log)
