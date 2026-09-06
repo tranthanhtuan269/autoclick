@@ -1,6 +1,10 @@
 bin/
 obj/
+dist/
+installer/files/
+installer/version.iss
 *.user
 *.suo
 .vs/
 results/
+AutoClick-Setup*.exe

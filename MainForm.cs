@@ -11,27 +11,43 @@ namespace AutoClick;
 ///   Giá trị mặc định từ khóa, link  → _txtKeywords.Text / _txtTargets.Text
 ///   Delay, số trang mặc định        → _numDelay.Value / _numPages.Value
 ///   Tự động lặp lại từ khóa         → _chkAutoRepeat.Checked
-///   Proxy trình duyệt               → _txtProxy.Text
+///   Chạy nền (ẩn cửa sổ trình duyệt)→ _chkHeadless.Checked
+///   Luồng trang 1→2→lại 1           → _chkBouncePages.Checked
+///   Số lần click mở tab mới         → _numNewTabs.Value
+///   Proxy trình duyệt (mỗi dòng 1)  → _txtProxy.Text
 ///   Thư mục lưu mặc định            → _txtOutput.Text
 ///   Nhãn tiếng Việt trên form       → BuildBrowserGroup / BuildSearchGroup
+///   Site gửi lên scan               → _txtScanSite.Text
 ///   Validate trước khi chạy         → ReadConfig()
-///   Bấm Bắt đầu                     → StartAsync()
+///   Bấm Bắt đầu                     → StartAsync() (gửi scan rồi crawl)
 /// </summary>
 public sealed class MainForm : Form
 {
     readonly ComboBox _cboBrowser = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-    readonly ComboBox _cboProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-    readonly Label _lblBrowserStatus = new() { AutoSize = true, ForeColor = Color.DarkSlateGray, Text = "Chọn trình duyệt đã cài trên máy." };
-    readonly TextBox _txtProxy = new() { Dock = DockStyle.Fill };
+    readonly TextBox _txtProxy = Multiline();
     readonly TextBox _txtKeywords = Multiline();
+    readonly TextBox _txtScanSite = new() { Dock = DockStyle.Fill };
     readonly TextBox _txtTargets = Multiline();
-    readonly ComboBox _cboMatch = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+    bool _scanSiteManual;
     // Đổi Value = số trang Google mặc định / delay (ms) mặc định.
     readonly NumericUpDown _numPages = new() { Minimum = 1, Maximum = 20, Value = 3, Dock = DockStyle.Fill };
     readonly NumericUpDown _numDelay = new() { Minimum = 200, Maximum = 20000, Increment = 100, Value = 1500, Dock = DockStyle.Fill };
+    readonly NumericUpDown _numNewTabs = new() { Minimum = 1, Maximum = 10, Value = 1, Dock = DockStyle.Fill };
     readonly CheckBox _chkAutoRepeat = new()
     {
         Text = "Tự động lặp lại khi quét hết từ khóa",
+        Checked = false,
+        AutoSize = true
+    };
+    readonly CheckBox _chkHeadless = new()
+    {
+        Text = "Chạy nền (không hiện cửa sổ trình duyệt)",
+        Checked = false,
+        AutoSize = true
+    };
+    readonly CheckBox _chkBouncePages = new()
+    {
+        Text = "Không thấy trang 1 thì sang trang 2, rồi tìm lại trang 1",
         Checked = false,
         AutoSize = true
     };
@@ -75,25 +91,58 @@ public sealed class MainForm : Form
         split.Panel2.Controls.Add(right);
         Controls.Add(split);
 
-        // SelectedIndex: 0=Contains, 1=Domain, 2=Exact (phải khớp ReadConfig).
-        _cboMatch.Items.AddRange(["Contains (URL chứa chuỗi)", "Domain (khớp domain)", "Exact (khớp đúng URL)"]);
-        _cboMatch.SelectedIndex = 1; // Domain: http://dienmayxanh.com/ khớp mọi bài trên site
         // Thư mục lưu mặc định. Đổi nếu muốn để Desktop hoặc D:\crawl.
         _txtOutput.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "AutoClick", "results");
         // Text mẫu trên form — xóa hoặc đổi thành keyword/link bạn hay dùng.
         _txtKeywords.Text = "hakoreview" + Environment.NewLine + "hako" + Environment.NewLine + "bánh mì";
         _txtTargets.Text = "https://www.example.com";
         _txtSelectors.PlaceholderText = "title = h1" + Environment.NewLine + "mota = meta[name='description']";
-        _txtProxy.PlaceholderText = "Để trống = không dùng. Ví dụ: 1.2.3.4:8080 hoặc 1.2.3.4:8080:user:pass";
-        var proxyTip = new ToolTip { AutoPopDelay = 12000, ShowAlways = true };
+        _txtProxy.PlaceholderText = "Để trống = không dùng. Mỗi dòng 1 proxy, ví dụ:" + Environment.NewLine +
+            "1.2.3.4:8080" + Environment.NewLine +
+            "1.2.3.4:8080:user:pass";
+        var proxyTip = new ToolTip { AutoPopDelay = 14000, ShowAlways = true };
         proxyTip.SetToolTip(_txtProxy,
+            "Mỗi dòng 1 proxy, không giới hạn số dòng.\n" +
             "HTTP: host:port hoặc host:port:user:pass\n" +
             "Hoặc user:pass@host:port\n" +
-            "SOCKS5: socks5://host:port");
+            "SOCKS5: socks5://host:port\n" +
+            "Nhiều proxy: hết một bộ từ khóa sẽ đóng trình duyệt rồi mở lại với proxy tiếp theo.");
+        proxyTip.SetToolTip(_chkAutoRepeat,
+            "Bật: hết bộ từ khóa thì chạy lại từ đầu, tới khi bấm Dừng.\n" +
+            "Nếu có nhiều proxy: mỗi vòng dùng proxy tiếp theo, hết danh sách thì quay lại đầu.");
+        proxyTip.SetToolTip(_chkHeadless,
+            "Bật: trình duyệt chạy ẩn, không hiện cửa sổ, click bằng Playwright.\n" +
+            "Tắt: mở cửa sổ như bình thường.");
+        proxyTip.SetToolTip(_chkBouncePages,
+            "Bật: trang 1 không khớp → sang trang 2 → click lại trang 1 và tìm lại.\n" +
+            "Vẫn không có thì sang từ khóa tiếp theo. Không dùng ô số trang tối đa.");
+        proxyTip.SetToolTip(_numNewTabs,
+            "Khi khớp link mục tiêu: click bấy nhiêu lần, mỗi lần mở 1 tab mới.");
+        proxyTip.SetToolTip(_txtScanSite,
+            "Tên site trên scan.thuoc360.com (chữ thường, số, gạch ngang).\n" +
+            "Từ khóa có dấu cách không gửi được — điền site hoặc để trống để lấy từ domain mục tiêu.\n" +
+            "Bấm Bắt đầu sẽ lưu form máy này và gửi báo cáo lên scan.");
+        _chkBouncePages.CheckedChanged += (_, _) => _numPages.Enabled = !_chkBouncePages.Checked;
+        _txtScanSite.PlaceholderText = "vd. brandchoicereview — để trống sẽ lấy từ domain mục tiêu";
+        _txtScanSite.TextChanged += (_, _) =>
+        {
+            if (_txtScanSite.Focused)
+                _scanSiteManual = _txtScanSite.Text.Trim().Length > 0;
+        };
+        _txtKeywords.Leave += (_, _) => SuggestScanSiteIfNeeded();
+        _txtTargets.Leave += (_, _) => SuggestScanSiteIfNeeded();
 
-        _cboBrowser.SelectedIndexChanged += (_, _) => ReloadProfiles();
-        Load += (_, _) => InitBrowsers();
-        FormClosing += (_, e) => _cts?.Cancel();
+        Load += (_, _) =>
+        {
+            InitBrowsers();
+            RestoreForm();
+            SuggestScanSiteIfNeeded();
+        };
+        FormClosing += (_, _) =>
+        {
+            PersistForm();
+            _cts?.Cancel();
+        };
     }
 
     Control BuildLeft()
@@ -129,26 +178,12 @@ public sealed class MainForm : Form
 
     Control BuildBrowserGroup()
     {
-        var t = Grid(5);
+        var t = Grid(2);
         t.Controls.Add(Lbl("Trình duyệt"), 0, 0);
         t.Controls.Add(_cboBrowser, 1, 0);
-        t.Controls.Add(Lbl("Profile"), 0, 1);
-        t.Controls.Add(_cboProfile, 1, 1);
-        t.Controls.Add(Lbl("Proxy"), 0, 2);
-        t.Controls.Add(_txtProxy, 1, 2);
-
-        var btnCheck = new Button { Text = "Kiểm tra đang mở?", AutoSize = true };
-        var btnClose = new Button { Text = "Đóng trình duyệt", AutoSize = true };
-        btnCheck.Click += async (_, _) => await CheckBrowserAsync();
-        btnClose.Click += async (_, _) => await CloseBrowserClickedAsync();
-
-        var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        flow.Controls.Add(btnCheck);
-        flow.Controls.Add(btnClose);
-        t.Controls.Add(flow, 1, 3);
-        t.SetColumnSpan(_lblBrowserStatus, 2);
-        t.Controls.Add(_lblBrowserStatus, 0, 4);
-        _lblBrowserStatus.Margin = new Padding(0, 8, 0, 0);
+        _txtProxy.Height = 96;
+        t.Controls.Add(Lbl("Proxy" + Environment.NewLine + "(mỗi dòng 1, không giới hạn)"), 0, 1);
+        t.Controls.Add(_txtProxy, 1, 1);
         return t;
     }
 
@@ -162,17 +197,29 @@ public sealed class MainForm : Form
         _txtTargets.Height = 90;
         t.Controls.Add(Lbl("Danh sách từ khóa" + Environment.NewLine + "(mỗi dòng 1, chạy lần lượt)"), 0, 0);
         t.Controls.Add(_txtKeywords, 1, 0);
-        t.Controls.Add(Lbl("Link mục tiêu (mỗi dòng 1)"), 0, 1);
-        t.Controls.Add(_txtTargets, 1, 1);
-        t.Controls.Add(Lbl("Cách khớp"), 0, 2);
-        t.Controls.Add(_cboMatch, 1, 2);
+        t.Controls.Add(Lbl("Site trên scan"), 0, 1);
+        t.Controls.Add(_txtScanSite, 1, 1);
+        t.Controls.Add(Lbl("Link mục tiêu (mỗi dòng 1)"), 0, 2);
+        t.Controls.Add(_txtTargets, 1, 2);
         t.Controls.Add(Lbl("Số trang Google tối đa"), 0, 3);
         t.Controls.Add(_numPages, 1, 3);
         t.Controls.Add(Lbl("Delay giữa thao tác (ms)"), 0, 4);
         t.Controls.Add(_numDelay, 1, 4);
-        t.Controls.Add(Lbl("Chế độ chạy"), 0, 5);
-        t.Controls.Add(_chkAutoRepeat, 1, 5);
-        _chkAutoRepeat.Padding = new Padding(0, 6, 0, 0);
+        t.Controls.Add(Lbl("Số lần click mở tab mới"), 0, 5);
+        t.Controls.Add(_numNewTabs, 1, 5);
+        t.Controls.Add(Lbl("Chế độ chạy"), 0, 6);
+        var modes = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Padding = new Padding(0, 6, 0, 0)
+        };
+        modes.Controls.Add(_chkAutoRepeat);
+        modes.Controls.Add(_chkHeadless);
+        modes.Controls.Add(_chkBouncePages);
+        t.Controls.Add(modes, 1, 6);
         return t;
     }
 
@@ -226,76 +273,19 @@ public sealed class MainForm : Form
             _cboBrowser.Items.Add(b);
 
         if (_cboBrowser.Items.Count == 0)
+            return;
+
+        var chromeIdx = -1;
+        for (var i = 0; i < _cboBrowser.Items.Count; i++)
         {
-            _lblBrowserStatus.Text = "Không tìm thấy Chrome hoặc Edge.";
-            _lblBrowserStatus.ForeColor = Color.Firebrick;
-            return;
+            if (_cboBrowser.Items[i] is InstalledBrowser b
+                && string.Equals(b.Channel, "chrome", StringComparison.OrdinalIgnoreCase))
+            {
+                chromeIdx = i;
+                break;
+            }
         }
-
-        _cboBrowser.SelectedIndex = 0;
-        ReloadProfiles();
-    }
-
-    void ReloadProfiles()
-    {
-        _cboProfile.Items.Clear();
-        if (_cboBrowser.SelectedItem is not InstalledBrowser browser)
-            return;
-        foreach (var p in BrowserLauncher.ListProfiles(browser))
-            _cboProfile.Items.Add(p);
-        if (_cboProfile.Items.Count > 0)
-            _cboProfile.SelectedIndex = 0;
-        if (string.Equals(browser.Channel, "chromium", StringComparison.OrdinalIgnoreCase))
-        {
-            _lblBrowserStatus.Text = "Đang dùng Playwright Chromium — không cần đóng Chrome/Edge trên máy.";
-            _lblBrowserStatus.ForeColor = Color.DarkGreen;
-        }
-        else
-        {
-            _lblBrowserStatus.Text = $"{browser.Kind} — đóng hết cửa sổ trước lần chạy đầu (app sẽ mở lại đúng profile của bạn).";
-            _lblBrowserStatus.ForeColor = Color.DarkSlateGray;
-        }
-    }
-
-    async Task CheckBrowserAsync()
-    {
-        if (_cboBrowser.SelectedItem is not InstalledBrowser browser)
-            return;
-        var n = BrowserLauncher.CountRunning(browser);
-        var cdp = await BrowserLauncher.IsCdpAliveAsync(BrowserLauncher.DefaultDebugPort);
-        var msg = n == 0
-            ? $"{browser.Kind} không đang chạy. Có thể bấm Bắt đầu."
-            : cdp
-                ? $"{browser.Kind} đang mở và đã bật điều khiển (CDP). Có thể chạy tiếp."
-                : $"{browser.Kind} đang mở ({n} process) — hãy đóng hết rồi mới chạy.";
-        _lblBrowserStatus.Text = msg;
-        _lblBrowserStatus.ForeColor = (n == 0 || cdp) ? Color.DarkGreen : Color.Firebrick;
-        AppendLog(msg);
-    }
-
-    async Task CloseBrowserClickedAsync()
-    {
-        if (_cboBrowser.SelectedItem is not InstalledBrowser browser)
-            return;
-        var n = BrowserLauncher.CountRunning(browser);
-        if (n == 0)
-        {
-            MessageBox.Show(this, browser.Kind + " không đang chạy.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        var ok = MessageBox.Show(
-            this,
-            $"Đóng toàn bộ cửa sổ {browser.Kind} ({n} process)?\nLưu tab/phiên làm việc trước nếu cần.",
-            "Xác nhận",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning);
-        if (ok != DialogResult.Yes)
-            return;
-
-        var progress = new Progress<string>(AppendLog);
-        await BrowserLauncher.CloseBrowserAsync(browser, progress);
-        await CheckBrowserAsync();
+        _cboBrowser.SelectedIndex = chromeIdx >= 0 ? chromeIdx : 0;
     }
 
     /// <summary>Đọc form → JobConfig. Thêm rule kiểm tra thì viết thêm throw ở đây.</summary>
@@ -303,8 +293,7 @@ public sealed class MainForm : Form
     {
         if (_cboBrowser.SelectedItem is not InstalledBrowser browser)
             throw new InvalidOperationException("Chưa chọn trình duyệt.");
-        if (_cboProfile.SelectedItem is not BrowserProfileInfo profile)
-            throw new InvalidOperationException("Chưa chọn profile.");
+        var profile = ResolveProfile(browser);
 
         var keywords = Lines(_txtKeywords.Text);
         var targets = Lines(_txtTargets.Text);
@@ -317,13 +306,6 @@ public sealed class MainForm : Form
         if (string.IsNullOrWhiteSpace(output))
             throw new InvalidOperationException("Chưa chọn thư mục lưu.");
         Directory.CreateDirectory(output);
-
-        var mode = _cboMatch.SelectedIndex switch
-        {
-            1 => MatchMode.Domain,
-            2 => MatchMode.Exact,
-            _ => MatchMode.Contains
-        };
 
         // Mỗi dòng: "ten_truong = css-selector". Dòng không có dấu = sẽ bị bỏ.
         var selectors = new List<CustomSelector>();
@@ -343,14 +325,19 @@ public sealed class MainForm : Form
         {
             Browser = browser,
             Profile = profile,
-            ScanSite = keywords[0],
+            ScanSite = ScanApiClient.SuggestScanSite(_txtScanSite.Text, keywords, targets)
+                       ?? throw new InvalidOperationException(
+                           "Điền Site trên scan (vd. brandchoicereview). Từ khóa có dấu cách không dùng làm site được."),
             Keywords = keywords,
             TargetLinks = targets,
-            MatchMode = mode,
+            MatchMode = MatchMode.Contains,
             MaxGooglePages = (int)_numPages.Value,
             DelayMs = (int)_numDelay.Value,
+            BouncePageRetry = _chkBouncePages.Checked,
+            OpenNewTabClicks = (int)_numNewTabs.Value,
             AutoRepeat = _chkAutoRepeat.Checked,
-            Proxy = BrowserProxy.Parse(_txtProxy.Text),
+            Headless = _chkHeadless.Checked,
+            Proxies = BrowserProxy.ParseMany(_txtProxy.Text),
             OutputDirectory = output,
             SaveHtml = _chkHtml.Checked,
             SaveCsv = _chkCsv.Checked,
@@ -380,20 +367,45 @@ public sealed class MainForm : Form
         _btnStart.Enabled = false;
         _btnStop.Enabled = true;
         _progress.MarqueeAnimationSpeed = 30;
-        SetStatus(config.AutoRepeat ? "Đang chạy (tự động lặp lại)..." : "Đang chạy...");
+        SetStatus(StatusWhileRunning(config));
 
+        PersistForm();
         var log = new Progress<string>(AppendLog);
         BrowserSession? session = null;
         try
         {
-            ScanApiClient.SendInBackground(config);
+            AppendLog("Đang lưu form và gửi lên scan...");
+            try
+            {
+                await ScanApiClient.SendAsync(config, log);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Scan: không gửi được — " + ex.Message);
+            }
 
-            session = await BrowserLauncher.ConnectOrLaunchAsync(
-                config.Browser, config.Profile, config.DebugPort, log, _cts.Token, config.Proxy);
-            var (folder, results) = await GoogleCrawlerService.RunAsync(config, session, log, _cts.Token);
+            var (folder, results) = await GoogleCrawlerService.RunAsync(
+                config,
+                async (proxy, token) =>
+                {
+                    if (session != null)
+                    {
+                        await CloseSessionAsync(session, log);
+                        session = null;
+                    }
+
+                    session = await BrowserLauncher.ConnectOrLaunchAsync(
+                        config.Browser, config.Profile, config.DebugPort, log, token, proxy, config.Headless);
+                    return session;
+                },
+                log,
+                _cts.Token);
             _lastRunFolder = folder;
-            await CloseSessionAsync(session, log);
-            session = null;
+            if (session != null)
+            {
+                await CloseSessionAsync(session, log);
+                session = null;
+            }
 
             if (_cts.IsCancellationRequested)
             {
@@ -404,7 +416,10 @@ public sealed class MainForm : Form
 
             var found = results.Count(r => r.Found);
             SetStatus($"Xong. Khớp {found}/{results.Count} từ khóa.");
-            MessageBox.Show(this, $"Hoàn tất.\nKhớp {found}/{results.Count} từ khóa.\nKết quả: {_lastRunFolder}", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!config.Headless)
+            {
+                MessageBox.Show(this, $"Hoàn tất.\nKhớp {found}/{results.Count} từ khóa.\nKết quả: {_lastRunFolder}", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -427,6 +442,85 @@ public sealed class MainForm : Form
             _progress.Value = 0;
             _cts.Dispose();
             _cts = null;
+        }
+    }
+
+    void SuggestScanSiteIfNeeded()
+    {
+        if (_scanSiteManual)
+            return;
+        var suggested = ScanApiClient.SuggestScanSite(
+            null,
+            Lines(_txtKeywords.Text),
+            Lines(_txtTargets.Text));
+        if (!string.IsNullOrWhiteSpace(suggested))
+            _txtScanSite.Text = suggested;
+    }
+
+    void PersistForm()
+    {
+        try
+        {
+            var s = UserSettings.Load();
+            s.FormSaved = true;
+            s.BrowserKind = (_cboBrowser.SelectedItem as InstalledBrowser)?.Kind;
+            s.Proxy = _txtProxy.Text;
+            s.Keywords = _txtKeywords.Text;
+            s.Targets = _txtTargets.Text;
+            s.ScanSite = _txtScanSite.Text.Trim();
+            s.MaxGooglePages = (int)_numPages.Value;
+            s.DelayMs = (int)_numDelay.Value;
+            s.OpenNewTabClicks = (int)_numNewTabs.Value;
+            s.AutoRepeat = _chkAutoRepeat.Checked;
+            s.Headless = _chkHeadless.Checked;
+            s.BouncePageRetry = _chkBouncePages.Checked;
+            s.Save();
+        }
+        catch
+        {
+            // không chặn đóng form / chạy job
+        }
+    }
+
+    void RestoreForm()
+    {
+        var s = UserSettings.Load();
+        if (!s.FormSaved)
+            return;
+
+        if (!string.IsNullOrWhiteSpace(s.Proxy))
+            _txtProxy.Text = s.Proxy;
+        if (!string.IsNullOrWhiteSpace(s.Keywords))
+            _txtKeywords.Text = s.Keywords;
+        if (!string.IsNullOrWhiteSpace(s.Targets))
+            _txtTargets.Text = s.Targets;
+        if (!string.IsNullOrWhiteSpace(s.ScanSite))
+        {
+            _txtScanSite.Text = s.ScanSite;
+            _scanSiteManual = true;
+        }
+        if (s.MaxGooglePages >= _numPages.Minimum && s.MaxGooglePages <= _numPages.Maximum)
+            _numPages.Value = s.MaxGooglePages;
+        if (s.DelayMs >= _numDelay.Minimum && s.DelayMs <= _numDelay.Maximum)
+            _numDelay.Value = s.DelayMs;
+        if (s.OpenNewTabClicks >= _numNewTabs.Minimum && s.OpenNewTabClicks <= _numNewTabs.Maximum)
+            _numNewTabs.Value = s.OpenNewTabClicks;
+        _chkAutoRepeat.Checked = s.AutoRepeat;
+        _chkHeadless.Checked = s.Headless;
+        _chkBouncePages.Checked = s.BouncePageRetry;
+        _numPages.Enabled = !_chkBouncePages.Checked;
+
+        if (!string.IsNullOrWhiteSpace(s.BrowserKind))
+        {
+            for (var i = 0; i < _cboBrowser.Items.Count; i++)
+            {
+                if (_cboBrowser.Items[i] is InstalledBrowser b
+                    && string.Equals(b.Kind, s.BrowserKind, StringComparison.OrdinalIgnoreCase))
+                {
+                    _cboBrowser.SelectedIndex = i;
+                    break;
+                }
+            }
         }
     }
 
@@ -473,6 +567,27 @@ public sealed class MainForm : Form
     void SetStatus(string text)
     {
         _lblStatus.Text = text;
+    }
+
+    static string StatusWhileRunning(JobConfig config)
+    {
+        var manyProxies = config.Proxies.Count > 1;
+        if (config.Headless && config.AutoRepeat)
+            return manyProxies ? "Đang chạy nền (lặp từ khóa, xoay proxy)..." : "Đang chạy nền (tự động lặp lại)...";
+        if (config.Headless)
+            return manyProxies ? "Đang chạy nền (xoay proxy)..." : "Đang chạy nền...";
+        if (config.AutoRepeat)
+            return manyProxies ? "Đang chạy (lặp từ khóa, xoay proxy)..." : "Đang chạy (tự động lặp lại)...";
+        return manyProxies ? "Đang chạy (xoay proxy)..." : "Đang chạy...";
+    }
+
+    /// <summary>Profile không còn trên form — lấy Default hoặc profile đầu tiên để mở cửa sổ riêng.</summary>
+    static BrowserProfileInfo ResolveProfile(InstalledBrowser browser)
+    {
+        var list = BrowserLauncher.ListProfiles(browser);
+        return list.FirstOrDefault(p => p.FolderName.Equals("Default", StringComparison.OrdinalIgnoreCase))
+               ?? list.FirstOrDefault()
+               ?? new BrowserProfileInfo { FolderName = "Default", DisplayName = "Default" };
     }
 
     /// <summary>Tách textarea thành list, bỏ dòng trống, không phân biệt hoa thường khi loại trùng.</summary>

@@ -34,7 +34,7 @@ public sealed class JobConfig
     public required InstalledBrowser Browser { get; init; }
     public required BrowserProfileInfo Profile { get; init; }
 
-    /// <summary>site trên API scan — lấy từ dòng từ khóa đầu tiên.</summary>
+    /// <summary>site trên API scan — từ khóa đầu khớp sitename (vd. hakoreview).</summary>
     public string ScanSite { get; init; } = "";
 
     /// <summary>Mỗi phần tử = 1 từ khóa Google — đồng thời gửi lên API làm key.</summary>
@@ -48,6 +48,15 @@ public sealed class JobConfig
     /// <summary>Số trang Google tối đa (1 trang ≈ 10 kết quả). Tăng nếu site hay nằm trang sau.</summary>
     public int MaxGooglePages { get; init; } = 3;
 
+    /// <summary>
+    /// true = trang 1 → trang 2 → tìm lại trang 1; hết thì sang từ khóa khác.
+    /// Bỏ qua MaxGooglePages.
+    /// </summary>
+    public bool BouncePageRetry { get; init; }
+
+    /// <summary>Số lần click link khớp để mở tab mới (mỗi lần 1 tab).</summary>
+    public int OpenNewTabClicks { get; init; } = 1;
+
     /// <summary>Nghỉ giữa các thao tác (ms) cho giống người dùng, giảm bị chặn.</summary>
     public int DelayMs { get; init; } = 1500;
 
@@ -57,8 +66,14 @@ public sealed class JobConfig
     /// </summary>
     public bool AutoRepeat { get; init; }
 
-    /// <summary>null = mở trình duyệt không qua proxy.</summary>
-    public BrowserProxy? Proxy { get; init; }
+    /// <summary>true = trình duyệt headless, không hiện cửa sổ.</summary>
+    public bool Headless { get; init; }
+
+    /// <summary>Danh sách proxy (mỗi phần tử 1 dòng trên form). Rỗng = không dùng proxy.</summary>
+    public IReadOnlyList<BrowserProxy> Proxies { get; init; } = [];
+
+    /// <summary>Proxy đầu danh sách — tương thích chỗ chỉ cần 1 proxy (API scan).</summary>
+    public BrowserProxy? Proxy => Proxies.Count > 0 ? Proxies[0] : null;
 
     public required string OutputDirectory { get; init; }
     public bool SaveHtml { get; init; } = true;

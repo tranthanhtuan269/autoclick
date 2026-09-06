@@ -10,6 +10,8 @@ public static class OsMouse
 {
     const uint MouseeventfLeftdown = 0x0002;
     const uint MouseeventfLeftup = 0x0004;
+    const byte VkControl = 0x11;
+    const uint KeyeventfKeyup = 0x0002;
 
     [DllImport("user32.dll")]
     static extern bool SetCursorPos(int x, int y);
@@ -23,6 +25,9 @@ public static class OsMouse
     [DllImport("user32.dll")]
     static extern int ShowCursor(bool bShow);
 
+    [DllImport("user32.dll")]
+    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     [StructLayout(LayoutKind.Sequential)]
     struct PointApi
     {
@@ -30,8 +35,8 @@ public static class OsMouse
         public int Y;
     }
 
-    /// <summary>Kéo con trỏ từ vị trí hiện tại tới (x,y) rồi click trái.</summary>
-    public static async Task MoveSmoothAndClickAsync(int x, int y, CancellationToken ct)
+    /// <summary>Kéo con trỏ từ vị trí hiện tại tới (x,y), chưa click.</summary>
+    public static async Task MoveSmoothAsync(int x, int y, CancellationToken ct)
     {
         EnsureCursorVisible();
 
@@ -50,7 +55,33 @@ public static class OsMouse
 
         SetCursorPos(x, y);
         await Task.Delay(90, ct);
+    }
 
+    /// <summary>Kéo con trỏ từ vị trí hiện tại tới (x,y) rồi click trái.</summary>
+    public static async Task MoveSmoothAndClickAsync(int x, int y, CancellationToken ct)
+    {
+        await MoveSmoothAsync(x, y, ct);
+        await LeftClickAsync(ct);
+    }
+
+    /// <summary>Kéo chuột rồi Ctrl+click trái — Chrome mở tab mới, không rời trang Google.</summary>
+    public static async Task MoveSmoothAndCtrlClickAsync(int x, int y, CancellationToken ct)
+    {
+        await MoveSmoothAsync(x, y, ct);
+        keybd_event(VkControl, 0, 0, UIntPtr.Zero);
+        await Task.Delay(30, ct);
+        try
+        {
+            await LeftClickAsync(ct);
+        }
+        finally
+        {
+            keybd_event(VkControl, 0, KeyeventfKeyup, UIntPtr.Zero);
+        }
+    }
+
+    static async Task LeftClickAsync(CancellationToken ct)
+    {
         mouse_event(MouseeventfLeftdown, 0, 0, 0, UIntPtr.Zero);
         await Task.Delay(45, ct);
         mouse_event(MouseeventfLeftup, 0, 0, 0, UIntPtr.Zero);

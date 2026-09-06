@@ -11,6 +11,12 @@ namespace AutoClick.Services;
 /// </summary>
 public static class VisibleMouse
 {
+    static IReadOnlySet<int>? OwnerProcessIds;
+
+    /// <summary>PID cửa sổ do app mở — tránh click nhầm vào Chrome hàng ngày.</summary>
+    public static void SetOwnerProcessIds(IReadOnlyList<int>? pids)
+        => OwnerProcessIds = pids is { Count: > 0 } ? pids.ToHashSet() : null;
+
     delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
@@ -66,67 +72,17 @@ public static class VisibleMouse
         public int Y;
     }
 
-    public static async Task<bool> ClickAsync(IPage page, ILocator loc, IProgress<string> log, CancellationToken ct)
+    public static async Task<bool> ClickAsync(IPage page, ILocator loc, IProgress<string> log, CancellationToken ct, bool ctrlClick = false)
     {
         try
         {
-            await page.BringToFrontAsync();
-            await loc.ScrollIntoViewIfNeededAsync(new() { Timeout = 8000 });
-            await ShowPagePointerAsync(loc);
-            await page.WaitForTimeoutAsync(150);
+            if (!await MoveToAsync(page, loc, log, ct))
+                return await ClickByJsFallbackAsync(page, loc, log, ct, ctrlClick);
 
-            var box = await loc.BoundingBoxAsync();
-            if (box == null || box.Width < 1 || box.Height < 1)
-            {
-                log.Report("Không lấy được bounding box của phần tử.");
-                return false;
-            }
-
-            var cssX = box.X + box.Width / 2;
-            var cssY = box.Y + box.Height / 2;
-
-            var viewport = await page.EvaluateAsync<int[]>("() => [window.innerWidth, window.innerHeight]");
-            var innerW = Math.Max(1, viewport[0]);
-            var innerH = Math.Max(1, viewport[1]);
-
-            if (!TryFindPlaywrightRenderWidget(out var topHwnd, out var renderHwnd))
-            {
-                var fg = GetForegroundWindow();
-                if (GetClass(fg) == "Chrome_WidgetWin_1")
-                {
-                    topHwnd = fg;
-                    renderHwnd = FindLargestRenderWidget(fg);
-                }
-            }
-
-            if (topHwnd == IntPtr.Zero || renderHwnd == IntPtr.Zero)
-            {
-                log.Report("Không tìm HWND Chromium — fallback tọa độ JS (có thể lệch).");
-                return await ClickByJsFallbackAsync(page, loc, log, ct);
-            }
-
-            BringToFront(topHwnd);
-            await Task.Delay(120, ct);
-
-            GetClientRect(renderHwnd, out var client);
-            if (client.Width < 10 || client.Height < 10)
-            {
-                log.Report("Render widget quá nhỏ, fallback JS.");
-                return await ClickByJsFallbackAsync(page, loc, log, ct);
-            }
-
-            // Đổi CSS viewport → pixel client của HWND (đã gồm DPI/zoom).
-            var scaleX = client.Width / (double)innerW;
-            var scaleY = client.Height / (double)innerH;
-            var point = new PointApi
-            {
-                X = (int)Math.Round(cssX * scaleX),
-                Y = (int)Math.Round(cssY * scaleY)
-            };
-            ClientToScreen(renderHwnd, ref point);
-
-            log.Report($"Kéo chuột tới link ({point.X}, {point.Y}) [hwnd scale {scaleX:0.00}x]...");
-            await OsMouse.MoveSmoothAndClickAsync(point.X, point.Y, ct);
+            if (ctrlClick)
+                await OsMouse.MoveSmoothAndCtrlClickAsync(_lastScreenX, _lastScreenY, ct);
+            else
+                await OsMouse.MoveSmoothAndClickAsync(_lastScreenX, _lastScreenY, ct);
             return true;
         }
         catch (Exception ex)
@@ -136,8 +92,76 @@ public static class VisibleMouse
         }
     }
 
+    static int _lastScreenX;
+    static int _lastScreenY;
+
+    /// <summary>Kéo kim chuột tới phần tử, chưa click — dùng khi click thật bằng Playwright trên đúng thẻ &lt;a&gt;.</summary>
+    public static async Task<bool> MoveToAsync(IPage page, ILocator loc, IProgress<string> log, CancellationToken ct)
+    {
+        await page.BringToFrontAsync();
+        await loc.ScrollIntoViewIfNeededAsync(new() { Timeout = 8000 });
+        await ShowPagePointerAsync(loc);
+        await page.WaitForTimeoutAsync(150);
+
+        var box = await loc.BoundingBoxAsync();
+        if (box == null || box.Width < 1 || box.Height < 1)
+        {
+            log.Report("Không lấy được bounding box của phần tử.");
+            return false;
+        }
+
+        var clickEl = loc.Locator("h3").First;
+        if (await clickEl.CountAsync() > 0)
+        {
+            var h3 = await clickEl.BoundingBoxAsync();
+            if (h3 is { Width: > 8, Height: > 8 })
+                box = h3;
+        }
+
+        var cssX = box.X + Math.Min(48, box.Width * 0.35);
+        var cssY = box.Y + box.Height / 2;
+
+        var viewport = await page.EvaluateAsync<int[]>("() => [window.innerWidth, window.innerHeight]");
+        var innerW = Math.Max(1, viewport[0]);
+        var innerH = Math.Max(1, viewport[1]);
+
+        if (!TryFindPlaywrightRenderWidget(out var topHwnd, out var renderHwnd))
+        {
+            var fg = GetForegroundWindow();
+            if (GetClass(fg) == "Chrome_WidgetWin_1")
+            {
+                topHwnd = fg;
+                renderHwnd = FindLargestRenderWidget(fg);
+            }
+        }
+
+        if (topHwnd == IntPtr.Zero || renderHwnd == IntPtr.Zero)
+            return false;
+
+        BringToFront(topHwnd);
+        await Task.Delay(120, ct);
+
+        GetClientRect(renderHwnd, out var client);
+        if (client.Width < 10 || client.Height < 10)
+            return false;
+
+        var scaleX = client.Width / (double)innerW;
+        var scaleY = client.Height / (double)innerH;
+        var point = new PointApi
+        {
+            X = (int)Math.Round(cssX * scaleX),
+            Y = (int)Math.Round(cssY * scaleY)
+        };
+        ClientToScreen(renderHwnd, ref point);
+        _lastScreenX = point.X;
+        _lastScreenY = point.Y;
+        log.Report($"Kéo chuột tới tiêu đề đích ({point.X}, {point.Y}) [hwnd scale {scaleX:0.00}x]...");
+        await OsMouse.MoveSmoothAsync(point.X, point.Y, ct);
+        return true;
+    }
+
     /// <summary>Fallback cũ: screenX + thanh công cụ, KHÔNG nhân devicePixelRatio.</summary>
-    static async Task<bool> ClickByJsFallbackAsync(IPage page, ILocator loc, IProgress<string> log, CancellationToken ct)
+    static async Task<bool> ClickByJsFallbackAsync(IPage page, ILocator loc, IProgress<string> log, CancellationToken ct, bool ctrlClick = false)
     {
         var pt = await loc.EvaluateAsync<double[]>(@"el => {
             const r = el.getBoundingClientRect();
@@ -152,8 +176,11 @@ public static class VisibleMouse
             return false;
         var x = (int)Math.Round(pt[0]);
         var y = (int)Math.Round(pt[1]);
-        log.Report($"Fallback JS click ({x}, {y}) — không nhân DPI.");
-        await OsMouse.MoveSmoothAndClickAsync(x, y, ct);
+        log.Report($"Fallback JS click ({x}, {y}) — không nhân DPI{(ctrlClick ? ", Ctrl" : "")}.");
+        if (ctrlClick)
+            await OsMouse.MoveSmoothAndCtrlClickAsync(x, y, ct);
+        else
+            await OsMouse.MoveSmoothAndClickAsync(x, y, ct);
         return true;
     }
 
@@ -171,7 +198,7 @@ public static class VisibleMouse
             if (!IsWindowVisible(h) || GetClass(h) != "Chrome_WidgetWin_1")
                 return true;
             GetWindowThreadProcessId(h, out var pid);
-            if (!IsPlaywrightChromium((int)pid))
+            if (!IsOwnedBrowser((int)pid))
                 return true;
             GetWindowRect(h, out var wr);
             var area = Math.Max(0, wr.Width) * Math.Max(0, wr.Height);
@@ -220,8 +247,11 @@ public static class VisibleMouse
         return best;
     }
 
-    static bool IsPlaywrightChromium(int pid)
+    static bool IsOwnedBrowser(int pid)
     {
+        if (OwnerProcessIds is { Count: > 0 })
+            return OwnerProcessIds.Contains(pid);
+
         try
         {
             using var p = Process.GetProcessById(pid);
@@ -232,10 +262,6 @@ public static class VisibleMouse
                 || path.Contains("chromium-", StringComparison.OrdinalIgnoreCase)
                 || path.Contains("chrome-win", StringComparison.OrdinalIgnoreCase))
                 return true;
-            // Playwright Chromium vẫn tên process "chrome" nhưng không nằm trong Google\Chrome.
-            if (path.Contains(@"Google\Chrome\", StringComparison.OrdinalIgnoreCase)
-                || path.Contains(@"Microsoft\Edge\", StringComparison.OrdinalIgnoreCase))
-                return false;
             return false;
         }
         catch

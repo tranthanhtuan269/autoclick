@@ -150,11 +150,15 @@ public static class LinkMatcher
     }
 
     /// <summary>
-    /// Google hay bọc link thật trong /url?q=... — lấy URL đích trước khi so khớp / click.
+    /// Google hay bọc link thật trong /url?q=... hoặc adurl= (quảng cáo /aclk).
+    /// Lấy URL đích trước khi so khớp / click.
     /// </summary>
     public static string UnwrapGoogleHref(string href)
+        => UnwrapGoogleHref(href, 0);
+
+    static string UnwrapGoogleHref(string href, int depth)
     {
-        if (string.IsNullOrWhiteSpace(href))
+        if (string.IsNullOrWhiteSpace(href) || depth > 3)
             return href;
 
         href = href.Trim();
@@ -163,34 +167,55 @@ public static class LinkMatcher
             var uri = href.StartsWith('/')
                 ? new Uri(new Uri("https://www.google.com"), href)
                 : new Uri(EnsureScheme(href));
-            var path = uri.AbsolutePath;
-            var isRedirect = path.Equals("/url", StringComparison.OrdinalIgnoreCase)
-                             || path.StartsWith("/url", StringComparison.OrdinalIgnoreCase);
-            if (isRedirect && uri.Host.Contains("google.", StringComparison.OrdinalIgnoreCase))
-            {
-                var query = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var part in query)
-                {
-                    var eq = part.IndexOf('=');
-                    if (eq <= 0)
-                        continue;
-                    var key = part[..eq];
-                    if (!key.Equals("q", StringComparison.OrdinalIgnoreCase)
-                        && !key.Equals("url", StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    var dest = Uri.UnescapeDataString(part[(eq + 1)..]);
-                    if (dest.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                        || dest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                        return dest;
-                }
-            }
+            if (!IsGoogleRedirectHost(uri.Host) || !LooksLikeGoogleRedirect(uri.AbsolutePath))
+                return href;
+
+            var dest = FirstHttpQueryValue(uri.Query, "adurl", "q", "url");
+            if (string.IsNullOrWhiteSpace(dest))
+                return href;
+            return UnwrapGoogleHref(dest, depth + 1);
         }
         catch
         {
-            // giữ nguyên href nếu parse lỗi
+            return href;
+        }
+    }
+
+    static bool IsGoogleRedirectHost(string host)
+    {
+        host = host.ToLowerInvariant();
+        return host.Contains("google.")
+               || host.Contains("googleadservices.com")
+               || host.Contains("googlesyndication.com")
+               || host.Contains("doubleclick.net");
+    }
+
+    static bool LooksLikeGoogleRedirect(string path)
+    {
+        path = path.ToLowerInvariant();
+        return path.Equals("/url", StringComparison.Ordinal)
+               || path.StartsWith("/url", StringComparison.Ordinal)
+               || path.Contains("/aclk", StringComparison.Ordinal)
+               || path.Contains("/pagead/", StringComparison.Ordinal);
+    }
+
+    static string? FirstHttpQueryValue(string query, params string[] keys)
+    {
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            if (eq <= 0)
+                continue;
+            var key = Uri.UnescapeDataString(part[..eq]);
+            if (!keys.Contains(key, StringComparer.OrdinalIgnoreCase))
+                continue;
+            var dest = Uri.UnescapeDataString(part[(eq + 1)..].Replace('+', ' '));
+            if (dest.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || dest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return dest;
         }
 
-        return href;
+        return null;
     }
 
     /// <summary>true nếu vẫn đang ở trang kết quả Google (chưa sang trang đích).</summary>

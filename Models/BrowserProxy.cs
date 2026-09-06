@@ -45,6 +45,37 @@ public sealed class BrowserProxy
         return proxy;
     }
 
+    /// <summary>Mỗi dòng 1 proxy. Bỏ dòng trống. Throw kèm số dòng nếu cú pháp sai.</summary>
+    public static IReadOnlyList<BrowserProxy> ParseMany(string? raw)
+    {
+        var result = new List<BrowserProxy>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var lines = (raw ?? "").Split(['\r', '\n'], StringSplitOptions.None);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var text = lines[i].Trim().Trim('"', '\'');
+            if (text.Length == 0 || text.StartsWith('#'))
+                continue;
+            if (!TryParse(text, out var proxy, out var error) || proxy == null)
+                throw new InvalidOperationException($"Proxy dòng {i + 1}: {error ?? "không hợp lệ."}");
+
+            var key = proxy.Server + "\0" + (proxy.Username ?? "");
+            if (seen.Add(key))
+                result.Add(proxy);
+        }
+
+        return result;
+    }
+
+    public bool SameAs(BrowserProxy? other)
+    {
+        if (other == null)
+            return false;
+        return string.Equals(Server, other.Server, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(Username ?? "", other.Username ?? "", StringComparison.Ordinal)
+               && string.Equals(Password ?? "", other.Password ?? "", StringComparison.Ordinal);
+    }
+
     public static bool TryParse(string text, out BrowserProxy? proxy, out string? error)
     {
         proxy = null;

@@ -4,6 +4,12 @@
       - Double-click build.bat
       - hoặc:  dotnet build -c Release
     File .exe: bin\Release\net8.0-windows\AutoClick.exe
+
+    Chuẩn bị file cho Inno Setup: double-click prepare-inno.bat
+      → rồi mở installer\AutoClick.iss trong Inno Setup Compiler
+    Đóng gói một phát (kể cả ISCC): double-click pack.bat
+      → dist\AutoClick-Setup-{version}.exe  (nếu đã cài Inno Setup 6)
+      → dist\AutoClick-portable-{version}.zip  (luôn có)
   -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -17,6 +23,8 @@
     <LangVersion>latest</LangVersion>
     <ApplicationTitle>AutoClick - Google Search Crawler</ApplicationTitle>
     <Version>1.2.0</Version>
+    <!-- Chỉ copy driver Playwright cho Windows x64 khi publish bộ cài. -->
+    <PlaywrightPlatform>win-x64</PlaywrightPlatform>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.55.0" />

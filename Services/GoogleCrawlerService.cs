@@ -8,28 +8,32 @@ namespace AutoClick.Services;
 ///
 /// Chỗ hay sửa:
 ///   OpenGoogleSearchAsync     — URL Google, ô search (textarea[name=q])
-///   ExtractResultUrlsAsync    — CSS lấy link kết quả (Google hay đổi)
+///   ExtractResultUrlsAsync    — CSS lấy link organic + quảng cáo (Google hay đổi)
 ///   GoNextGooglePageAsync     — nút trang sau
 ///   WaitForCaptchaIfNeededAsync — thời gian đợi giải CAPTCHA (mặc định 2 phút)
 ///   ProcessKeywordAsync       — cắt text 20000 ký tự, timeout selector
-    ///   VisibleMouse / OsMouse  — kéo con trỏ Windows rồi click (thấy kim chuột)
+///   RunAsync                  — hết bộ từ khóa thì đổi proxy (mở lại trình duyệt)
+///   VisibleMouse / OsMouse    — kéo con trỏ Windows rồi click (thấy kim chuột)
 /// </summary>
 public static class GoogleCrawlerService
 {
     public static async Task<(string RunFolder, IReadOnlyList<CrawlResult> Results)> RunAsync(
         JobConfig config,
-        BrowserSession session,
+        Func<BrowserProxy?, CancellationToken, Task<BrowserSession>> openSession,
         IProgress<string> log,
         CancellationToken ct)
     {
         var runFolder = ResultWriter.CreateRunFolder(config.OutputDirectory);
         log.Report("Thư mục kết quả: " + runFolder);
 
-        var page = await session.NewWorkPageAsync();
-        try { await page.BringToFrontAsync(); } catch { /* ignore */ }
+        var proxySlots = ProxySlots(config);
+        var rotateProxies = proxySlots.Count > 1;
         var results = new List<CrawlResult>();
         var total = config.Keywords.Count;
         var round = 0;
+        BrowserSession? session = null;
+        IPage? page = null;
+        BrowserProxy? currentProxy = null;
 
         void FlushResults()
         {
@@ -41,19 +45,25 @@ public static class GoogleCrawlerService
 
         try
         {
-            if (config.AutoRepeat)
-                log.Report("Đã bật tự động lặp lại — quét hết từ khóa sẽ chạy lại từ đầu. Bấm Dừng để thoát.");
+            LogRunPlan(config, proxySlots, log);
 
             while (true)
             {
                 round++;
                 ct.ThrowIfCancellationRequested();
-                if (config.AutoRepeat)
+                var proxy = proxySlots[(round - 1) % proxySlots.Count];
+                if (session == null || page == null || !SameProxy(currentProxy, proxy))
                 {
-                    log.Report(round > 1
-                        ? $"----- Đã quét hết {total} từ khóa. Bắt đầu lại từ đầu (lượt {round}) -----"
-                        : $"----- Lượt {round} -----");
+                    if (session != null && rotateProxies)
+                        log.Report($"Đóng cửa sổ để đổi proxy ({ProxyOrdinal(round, proxySlots.Count)})...");
+                    session = await openSession(proxy, ct);
+                    currentProxy = proxy;
+                    page = await OpenWorkPageAsync(session, config, log);
+                    if (proxy != null)
+                        await BrowserLauncher.ReportExitIpAsync(session.Context, log, ct);
                 }
+
+                LogRoundStart(config, rotateProxies, round, total, proxy, proxySlots.Count, log);
 
                 var roundStart = results.Count;
                 var index = 0;
@@ -62,7 +72,7 @@ public static class GoogleCrawlerService
                     index++;
                     ct.ThrowIfCancellationRequested();
                     log.Report("-----");
-                    log.Report(config.AutoRepeat
+                    log.Report(UseRoundLabel(config, rotateProxies)
                         ? $"Lượt {round} — từ khóa {index}/{total}: {keyword}"
                         : $"Từ khóa {index}/{total}: {keyword}");
                     var item = await ProcessKeywordAsync(page, session, keyword, config, log, ct);
@@ -74,14 +84,14 @@ public static class GoogleCrawlerService
                 }
 
                 FlushResults();
-                if (config.AutoRepeat)
+                if (UseRoundLabel(config, rotateProxies))
                 {
                     var roundCount = results.Count - roundStart;
                     var foundThisRound = results.Skip(roundStart).Count(r => r.Found);
                     log.Report($"Xong lượt {round}. Khớp {foundThisRound}/{roundCount} từ khóa.");
                 }
 
-                if (!config.AutoRepeat)
+                if (!ShouldContinue(config, rotateProxies, round, proxySlots.Count))
                     break;
 
                 await DelayAsync(config, ct);
@@ -93,11 +103,87 @@ public static class GoogleCrawlerService
         catch (OperationCanceledException)
         {
             FlushResults();
-            log.Report(config.AutoRepeat && round > 0
+            log.Report(round > 1
                 ? $"Đã dừng sau {round} lượt. Đã lưu vào: " + runFolder
                 : "Đã lưu kết quả vào: " + runFolder);
             return (runFolder, results);
         }
+    }
+
+    static List<BrowserProxy?> ProxySlots(JobConfig config)
+        => config.Proxies.Count == 0
+            ? [null]
+            : config.Proxies.Cast<BrowserProxy?>().ToList();
+
+    static bool SameProxy(BrowserProxy? a, BrowserProxy? b)
+        => a == null ? b == null : a.SameAs(b);
+
+    static bool UseRoundLabel(JobConfig config, bool rotateProxies)
+        => config.AutoRepeat || rotateProxies;
+
+    static bool ShouldContinue(JobConfig config, bool rotateProxies, int round, int proxyCount)
+    {
+        if (config.AutoRepeat)
+            return true;
+        return rotateProxies && round < proxyCount;
+    }
+
+    static void LogRunPlan(JobConfig config, IReadOnlyList<BrowserProxy?> slots, IProgress<string> log)
+    {
+        if (config.AutoRepeat)
+            log.Report("Đã bật tự động lặp lại — quét hết từ khóa sẽ chạy lại từ đầu. Bấm Dừng để thoát.");
+
+        if (config.Proxies.Count > 0)
+            log.Report("Có proxy — mở Google tiếng Anh và quét cả quảng cáo (Sponsored).");
+
+        if (slots.Count > 1)
+        {
+            log.Report(config.AutoRepeat
+                ? $"Có {slots.Count} proxy — hết bộ từ khóa sẽ đổi proxy. Hết danh sách sẽ quay lại proxy đầu."
+                : $"Có {slots.Count} proxy — chạy {slots.Count} vòng (mỗi vòng 1 proxy) rồi dừng.");
+        }
+    }
+
+    static void LogRoundStart(
+        JobConfig config,
+        bool rotateProxies,
+        int round,
+        int keywordCount,
+        BrowserProxy? proxy,
+        int proxyCount,
+        IProgress<string> log)
+    {
+        if (UseRoundLabel(config, rotateProxies))
+        {
+            log.Report(round > 1
+                ? $"----- Đã quét hết {keywordCount} từ khóa. Bắt đầu lại từ đầu (lượt {round}) -----"
+                : $"----- Lượt {round} -----");
+        }
+
+        if (proxyCount > 1)
+            log.Report($"Proxy {ProxyOrdinal(round, proxyCount)}: {proxy?.HostPort ?? "(không dùng)"}");
+        else if (proxy != null && round == 1)
+            log.Report("Proxy: " + proxy.HostPort + (proxy.HasAuth ? " (có user/pass)" : ""));
+    }
+
+    static string ProxyOrdinal(int round, int proxyCount)
+        => $"{((round - 1) % proxyCount) + 1}/{proxyCount}";
+
+    static async Task<IPage> OpenWorkPageAsync(BrowserSession session, JobConfig config, IProgress<string> log)
+    {
+        var page = await session.NewWorkPageAsync();
+        if (!config.Headless)
+        {
+            try { await page.BringToFrontAsync(); } catch { /* ignore */ }
+            await session.ApplyMiniWindowAsync(page);
+            log.Report($"Cửa sổ nửa trái màn hình {BrowserLauncher.MiniWindowWidth}x{BrowserLauncher.MiniWindowHeight}.");
+        }
+        else
+        {
+            log.Report("Chế độ chạy nền — không hiện cửa sổ trình duyệt.");
+        }
+
+        return page;
     }
 
     /// <summary>1 từ khóa: search → khớp → click → crawl → cuộn cuối trang → chờ 2s → back.</summary>
@@ -122,44 +208,9 @@ public static class GoogleCrawlerService
                 };
             }
 
-            string? matched = null;
-            for (var googlePage = 1; googlePage <= config.MaxGooglePages; googlePage++)
-            {
-                ct.ThrowIfCancellationRequested();
-                log.Report($"Quét trang Google {googlePage}/{config.MaxGooglePages}...");
-                await DelayAsync(config, ct);
-
-                var urls = await ExtractResultUrlsAsync(page);
-                log.Report($"  Tìm thấy {urls.Count} link.");
-                foreach (var sample in urls.Take(8))
-                    log.Report("    • " + sample);
-
-                matched = LinkMatcher.FindMatch(urls, config.TargetLinks, config.MatchMode);
-                if (matched != null)
-                {
-                    log.Report("  Khớp: " + matched);
-                    break;
-                }
-
-                if (urls.Count == 0)
-                    log.Report("  Chưa lấy được organic link. URL hiện tại: " + page.Url);
-                else
-                {
-                    var targetHosts = string.Join(", ", config.TargetLinks.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct());
-                    var serps = string.Join(", ", urls.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct().Take(12));
-                    log.Report($"  Chưa khớp. Target host: [{targetHosts}] | Host trên Google: [{serps}]");
-                }
-
-                if (googlePage < config.MaxGooglePages)
-                {
-                    var moved = await GoNextGooglePageAsync(page, log, ct);
-                    if (!moved)
-                    {
-                        log.Report("  Không còn trang sau.");
-                        break;
-                    }
-                }
-            }
+            var matched = config.BouncePageRetry
+                ? await FindMatchWithBounceAsync(page, keyword, config, log, ct)
+                : await FindMatchOnPagesAsync(page, config, log, ct);
 
             if (matched == null)
             {
@@ -172,7 +223,7 @@ public static class GoogleCrawlerService
                 };
             }
 
-            var targetPage = await OpenMatchedAsync(page, session, matched, log, ct);
+            var targetPage = await OpenMatchedAsync(page, session, matched, config, log, ct);
             await DelayAsync(config, ct);
 
             var title = await targetPage.TitleAsync();
@@ -229,13 +280,13 @@ public static class GoogleCrawlerService
     static async Task OpenGoogleSearchAsync(IPage page, string keyword, JobConfig config, IProgress<string> log, CancellationToken ct)
     {
         log.Report("Mở Google...");
-        // Đổi hl=vi thành hl=en nếu muốn Google tiếng Anh.
-        await page.GotoAsync("https://www.google.com/?hl=vi", new PageGotoOptions
+        await page.GotoAsync(GoogleHomeUrl(config), new PageGotoOptions
         {
             WaitUntil = WaitUntilState.DOMContentLoaded,
             Timeout = 45000
         });
-        await page.BringToFrontAsync();
+        if (!config.Headless)
+            await page.BringToFrontAsync();
         await DelayAsync(config, ct);
         await DismissConsentAsync(page, log);
 
@@ -243,9 +294,7 @@ public static class GoogleCrawlerService
         var box = page.Locator("textarea[name='q'], input[name='q']").First;
         if (await box.CountAsync() > 0)
         {
-            var osClick = await VisibleMouse.ClickAsync(page, box, log, ct);
-            if (!osClick)
-                await box.ClickAsync(new() { Timeout = 8000 });
+            await ClickElementAsync(page, box, config, log, ct);
             await box.FillAsync("");
             await box.PressSequentiallyAsync(keyword, new() { Delay = 35 });
             await DelayAsync(config, ct);
@@ -254,20 +303,38 @@ public static class GoogleCrawlerService
         else
         {
             log.Report("Không thấy ô search — mở URL tìm kiếm trực tiếp.");
-            var url = "https://www.google.com/search?hl=vi&num=10&q=" + Uri.EscapeDataString(keyword);
-            await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
+            await page.GotoAsync(GoogleSearchUrl(keyword, config), new PageGotoOptions
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = 45000
+            });
         }
 
         try
         {
-            // #search / #rso = khối kết quả; captcha-form = khi bị chặn.
-            await page.WaitForSelectorAsync("#search h3, #rso h3, a:has(h3), #captcha-form, iframe[src*='recaptcha']", new() { Timeout = 25000 });
+            // Organic + ads (Sponsored / Được tài trợ) + captcha.
+            await page.WaitForSelectorAsync(
+                "#search h3, #rso h3, a:has(h3), #tads, #tvcap, #tadsb, [data-text-ad], .uEierd h3, #captcha-form, iframe[src*='recaptcha']",
+                new() { Timeout = 25000 });
         }
         catch (TimeoutException)
         {
             log.Report("Hết thời gian chờ kết quả Google.");
         }
     }
+
+    /// <summary>
+    /// Có proxy (thường US) thì không ép hl=vi — ads coupon US chỉ hiện trên Google tiếng Anh.
+    /// </summary>
+    static string GoogleHomeUrl(JobConfig config)
+        => config.Proxies.Count > 0
+            ? "https://www.google.com/?hl=en&pws=0"
+            : "https://www.google.com/?hl=vi";
+
+    static string GoogleSearchUrl(string keyword, JobConfig config)
+        => config.Proxies.Count > 0
+            ? "https://www.google.com/search?hl=en&pws=0&num=10&q=" + Uri.EscapeDataString(keyword)
+            : "https://www.google.com/search?hl=vi&num=10&q=" + Uri.EscapeDataString(keyword);
 
     /// <summary>Bấm nút cookie nếu Google hiện. Thêm nhãn vào mảng labels nếu máy bạn hiện tiếng khác.</summary>
     static async Task DismissConsentAsync(IPage page, IProgress<string> log)
@@ -334,18 +401,26 @@ public static class GoogleCrawlerService
     }
 
     /// <summary>
-    /// Lấy URL đích (đã unwrap /url?q=). Ưu tiên link có h3 (tiêu đề organic).
+    /// Lấy URL đích (đã unwrap /url?q= và adurl=). Gồm organic + Sponsored ads.
     /// </summary>
     static async Task<List<string>> ExtractResultUrlsAsync(IPage page)
     {
         var urls = await page.EvaluateAsync<string[]>(@"() => {
-            const unwrap = (href) => {
+            const unwrap = (href, depth) => {
                 if (!href) return '';
+                depth = depth || 0;
+                if (depth > 3) return href;
                 try {
                     const u = new URL(href, location.origin);
-                    if (u.pathname === '/url' || u.pathname.startsWith('/url')) {
-                        const q = u.searchParams.get('q') || u.searchParams.get('url');
-                        if (q && /^https?:/i.test(q)) return q;
+                    const host = (u.hostname || '').toLowerCase();
+                    const path = (u.pathname || '').toLowerCase();
+                    const isGoogle = host.includes('google.') || host.includes('googleadservices.com')
+                        || host.includes('googlesyndication.com') || host.includes('doubleclick.net');
+                    const isRedirect = path === '/url' || path.startsWith('/url')
+                        || path.includes('/aclk') || path.includes('/pagead/');
+                    if (isGoogle && isRedirect) {
+                        const dest = u.searchParams.get('adurl') || u.searchParams.get('q') || u.searchParams.get('url');
+                        if (dest && /^https?:/i.test(dest)) return unwrap(dest, depth + 1);
                     }
                     return u.href;
                 } catch { return href; }
@@ -371,12 +446,20 @@ public static class GoogleCrawlerService
                 } catch {}
             };
             const groups = [
+                document.querySelectorAll('#tads a, #tvcap a, #tadsb a, #bottomads a, [data-text-ad] a, .uEierd a, [aria-label=""Ads""] a, [aria-label=""Sponsored""] a, [aria-label=""Được tài trợ""] a'),
                 document.querySelectorAll('#search a:has(h3), #rso a:has(h3), a[jsname=""UWckNb""], .yuRUbf a, a[data-ved]'),
                 document.querySelectorAll('#search a[href], #rso a[href], #center_col a[href], a[ping]')
             ];
             for (const nodes of groups) {
-                for (const a of nodes) add(a.href || a.getAttribute('href') || '');
+                for (const a of nodes) {
+                    add(a.href || a.getAttribute('href') || '');
+                    const pcu = a.getAttribute('data-pcu') || a.closest('[data-pcu]')?.getAttribute('data-pcu') || '';
+                    pcu.split(/\s+/).forEach(add);
+                }
             }
+            document.querySelectorAll('[data-pcu]').forEach(el => {
+                (el.getAttribute('data-pcu') || '').split(/\s+/).forEach(add);
+            });
             for (const cite of document.querySelectorAll('cite')) {
                 const a = cite.closest('a') || cite.closest('div')?.querySelector('a[href]');
                 if (a) add(a.href);
@@ -389,8 +472,105 @@ public static class GoogleCrawlerService
         return urls.Select(LinkMatcher.UnwrapGoogleHref).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    static async Task<string?> FindMatchOnPagesAsync(
+        IPage page,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        for (var googlePage = 1; googlePage <= config.MaxGooglePages; googlePage++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var matched = await ScanCurrentGooglePageAsync(page, googlePage, config.MaxGooglePages, config, log, ct);
+            if (matched != null)
+                return matched;
+
+            if (googlePage < config.MaxGooglePages)
+            {
+                var moved = await GoNextGooglePageAsync(page, config, log, ct);
+                if (!moved)
+                {
+                    log.Report("  Không còn trang sau.");
+                    break;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Trang 1 → trang 2 → tìm lại trang 1. Hết thì thôi.</summary>
+    static async Task<string?> FindMatchWithBounceAsync(
+        IPage page,
+        string keyword,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        log.Report("Luồng trang 1 → 2 → lại trang 1.");
+        var matched = await ScanCurrentGooglePageAsync(page, 1, 2, config, log, ct);
+        if (matched != null)
+            return matched;
+
+        log.Report("  Trang 1 chưa khớp — click sang trang 2...");
+        if (!await GoNextGooglePageAsync(page, config, log, ct))
+        {
+            log.Report("  Không sang được trang 2.");
+            return null;
+        }
+
+        matched = await ScanCurrentGooglePageAsync(page, 2, 2, config, log, ct);
+        if (matched != null)
+            return matched;
+
+        log.Report("  Trang 2 chưa khớp — click lại trang 1 và tìm kiếm lại...");
+        if (!await GoPrevGooglePageAsync(page, config, log, ct))
+            log.Report("  Không click được về trang 1 — mở lại ô tìm kiếm.");
+
+        await OpenGoogleSearchAsync(page, keyword, config, log, ct);
+        if (await WaitForCaptchaIfNeededAsync(page, log, ct))
+            return null;
+
+        return await ScanCurrentGooglePageAsync(page, 1, 2, config, log, ct);
+    }
+
+    static async Task<string?> ScanCurrentGooglePageAsync(
+        IPage page,
+        int googlePage,
+        int maxPages,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        log.Report($"Quét trang Google {googlePage}/{maxPages}...");
+        await DelayAsync(config, ct);
+
+        var urls = await ExtractResultUrlsAsync(page);
+        log.Report($"  Tìm thấy {urls.Count} link (organic + quảng cáo).");
+        foreach (var sample in urls.Take(8))
+            log.Report("    • " + sample);
+
+        var matched = LinkMatcher.FindMatch(urls, config.TargetLinks, config.MatchMode);
+        if (matched != null)
+        {
+            log.Report("  Khớp: " + matched);
+            return matched;
+        }
+
+        if (urls.Count == 0)
+            log.Report("  Chưa lấy được organic link. URL hiện tại: " + page.Url);
+        else
+        {
+            var targetHosts = string.Join(", ", config.TargetLinks.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct());
+            var serps = string.Join(", ", urls.Select(LinkMatcher.GetHost).Where(h => h.Length > 0).Distinct().Take(12));
+            log.Report($"  Chưa khớp. Target host: [{targetHosts}] | Host trên Google: [{serps}]");
+        }
+
+        return null;
+    }
+
     /// <summary>Bấm Next trên Google. Thêm aria-label nếu giao diện máy bạn khác.</summary>
-    static async Task<bool> GoNextGooglePageAsync(IPage page, IProgress<string> log, CancellationToken ct)
+    static async Task<bool> GoNextGooglePageAsync(IPage page, JobConfig config, IProgress<string> log, CancellationToken ct)
     {
         var next = page.Locator("a#pnnext, a[aria-label='Next page'], a[aria-label='Trang sau'], a[aria-label='Tiếp'], a[aria-label='Next']").First;
         if (await next.CountAsync() == 0)
@@ -398,9 +578,32 @@ public static class GoogleCrawlerService
         try
         {
             await next.ScrollIntoViewIfNeededAsync();
-            var osClick = await VisibleMouse.ClickAsync(page, next, log, ct);
-            if (!osClick)
-                await next.ClickAsync(new() { Timeout = 8000 });
+            await ClickElementAsync(page, next, config, log, ct);
+            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 20000 });
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static async Task<bool> GoPrevGooglePageAsync(IPage page, JobConfig config, IProgress<string> log, CancellationToken ct)
+    {
+        var prev = page.Locator(
+            "a#pnprev, a[aria-label='Previous page'], a[aria-label='Trang trước'], a[aria-label='Trước'], a[aria-label='Previous']").First;
+        if (await prev.CountAsync() == 0)
+        {
+            var page1 = page.Locator("a[aria-label='Page 1'], a[aria-label='Trang 1']").First;
+            if (await page1.CountAsync() == 0)
+                return false;
+            prev = page1;
+        }
+
+        try
+        {
+            await prev.ScrollIntoViewIfNeededAsync();
+            await ClickElementAsync(page, prev, config, log, ct);
             await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 20000 });
             return true;
         }
@@ -411,160 +614,360 @@ public static class GoogleCrawlerService
     }
 
     /// <summary>
-    /// Đánh dấu thẻ &lt;a&gt; khớp (viền cam), scroll vào giữa, rồi click chuột thật.
-    /// Ép target=_self để thấy chuyển trang trên cùng tab.
+    /// Đánh dấu thẻ &lt;a&gt; khớp, click N lần để mở tab mới, rồi làm việc trên tab cuối.
     /// </summary>
-    static async Task<IPage> OpenMatchedAsync(IPage page, BrowserSession session, string matched, IProgress<string> log, CancellationToken ct)
+    static async Task<IPage> OpenMatchedAsync(IPage page, BrowserSession session, string matched, JobConfig config, IProgress<string> log, CancellationToken ct)
     {
         log.Report("Đang tìm thẻ <a> trên trang Google để click...");
 
-        var marked = await page.EvaluateAsync<bool>(@"(matched) => {
-            const unwrap = (href) => {
-                if (!href) return '';
-                try {
-                    const u = new URL(href, location.origin);
-                    if (u.pathname === '/url' || u.pathname.startsWith('/url')) {
-                        const q = u.searchParams.get('q') || u.searchParams.get('url');
-                        if (q && /^https?:/i.test(q)) return q;
-                    }
-                    return u.href;
-                } catch { return href; }
-            };
-            const key = (u) => unwrap(u).replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/[?#].*$/,'').replace(/\/$/,'').toLowerCase();
-            const hostOf = (u) => {
-                try { return new URL(unwrap(u), location.origin).hostname.replace(/^www\./i,'').toLowerCase(); }
-                catch { return ''; }
-            };
-            const want = key(matched);
-            const wantHost = hostOf(matched);
-            const isHit = (real) => {
-                const k = key(real);
-                const h = hostOf(real);
-                if (k && want && (k.includes(want) || want.includes(k))) return true;
-                if (wantHost && h && (h === wantHost || h.endsWith('.' + wantHost) || wantHost.endsWith('.' + h))) return true;
-                return false;
-            };
-            const groups = [
-                document.querySelectorAll('#search a:has(h3), #rso a:has(h3), a[jsname=""UWckNb""]'),
-                document.querySelectorAll('#search a[href], #rso a[href]')
-            ];
-            const seen = new Set();
-            for (const nodes of groups) {
-                for (const a of nodes) {
-                    if (seen.has(a)) continue;
-                    seen.add(a);
-                    const real = unwrap(a.href || a.getAttribute('href') || '');
-                    if (!isHit(real)) continue;
-                    document.querySelectorAll('[data-autoclick-target]').forEach(el => {
-                        el.removeAttribute('data-autoclick-target');
-                        el.style.outline = '';
-                    });
-                    a.setAttribute('data-autoclick-target', '1');
-                    a.setAttribute('target', '_self');
-                    a.style.outline = '4px solid #ff6d00';
-                    a.style.outlineOffset = '3px';
-                    a.scrollIntoView({ block: 'center', inline: 'nearest' });
-                    return true;
-                }
-            }
-            return false;
-        }", matched);
-
-        if (!marked)
+        var clicks = Math.Max(1, config.OpenNewTabClicks);
+        var markedDest = await MarkMatchedLinkAsync(page, matched);
+        if (string.IsNullOrWhiteSpace(markedDest))
         {
-            log.Report("Không thấy thẻ <a> khớp trên DOM — mở URL trực tiếp (không phải click).");
+            log.Report("Không thấy thẻ <a> khớp — mở tab trực tiếp.");
+            IPage? last = null;
+            for (var i = 1; i <= clicks; i++)
+                last = await OpenForcedTabAsync(session, matched, log);
+            return last ?? page;
+        }
+
+        log.Report("Đánh dấu đúng link: " + markedDest);
+        log.Report($"Mở {clicks} tab mới bằng click trên thẻ đích (giữ trang Google).");
+        await page.WaitForTimeoutAsync(300);
+
+        var opened = new List<IPage>();
+        void OnNewPage(object? _, IPage extra)
+        {
+            if (opened.Contains(extra) || extra.IsClosed)
+                return;
+            opened.Add(extra);
+            if (!session.OwnedPages.Contains(extra))
+                session.OwnedPages.Add(extra);
+        }
+        session.Context.Page += OnNewPage;
+        try
+        {
+            for (var i = 1; i <= clicks; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                await EnsureSearchPageAsync(page, log, ct);
+                await page.BringToFrontAsync();
+
+                markedDest = await MarkMatchedLinkAsync(page, matched);
+                var loc = page.Locator("a[data-autoclick-target='1']").First;
+                if (string.IsNullOrWhiteSpace(markedDest) || await loc.CountAsync() == 0)
+                {
+                    log.Report("  Không thấy thẻ đích, mở tab trực tiếp.");
+                    var forced = await OpenForcedTabAsync(session, matched, log);
+                    if (!opened.Contains(forced))
+                        opened.Add(forced);
+                    continue;
+                }
+
+                var before = opened.Count;
+                log.Report($"  Click đích {i}/{clicks}: {markedDest}");
+                await ClickOpenNewTabAsync(page, loc, config, log, ct);
+
+                var got = await WaitForNewTabAsync(opened, before, 5000, ct);
+                if (!got)
+                {
+                    log.Report("    Click không ra tab mới — mở tab trực tiếp.");
+                    var tab = await OpenForcedTabAsync(session, matched, log);
+                    if (!opened.Contains(tab))
+                        opened.Add(tab);
+                    continue;
+                }
+
+                var extra = opened[^1];
+                await WaitUntilLeftGoogleAsync(extra);
+                if (!TabHitsTarget(extra.Url, matched, config.MatchMode))
+                {
+                    log.Report("    Tab lệch sang " + extra.Url + " — đóng và click lại đúng thẻ.");
+                    try { await extra.CloseAsync(); } catch { /* ignore */ }
+                    opened.Remove(extra);
+                    session.OwnedPages.Remove(extra);
+                    before = opened.Count;
+                    markedDest = await MarkMatchedLinkAsync(page, matched);
+                    loc = page.Locator("a[data-autoclick-target='1']").First;
+                    if (!string.IsNullOrWhiteSpace(markedDest) && await loc.CountAsync() > 0)
+                        await ClickTargetWithPlaywrightAsync(loc, log);
+                    got = await WaitForNewTabAsync(opened, before, 5000, ct);
+                    if (got)
+                    {
+                        extra = opened[^1];
+                        await WaitUntilLeftGoogleAsync(extra);
+                    }
+                    if (!got || !TabHitsTarget(opened[^1].Url, matched, config.MatchMode))
+                    {
+                        log.Report("    Vẫn lệch — mở đúng URL đích.");
+                        var tab = await OpenForcedTabAsync(session, matched, log);
+                        if (!opened.Contains(tab))
+                            opened.Add(tab);
+                        continue;
+                    }
+                }
+
+                log.Report("    Đã mở tab: " + opened[^1].Url);
+
+                await page.BringToFrontAsync();
+                await DelayAsync(config, ct);
+            }
+        }
+        finally
+        {
+            session.Context.Page -= OnNewPage;
+        }
+
+        var target = opened.LastOrDefault(p => !p.IsClosed);
+        if (target == null)
+        {
+            log.Report("Không mở được tab mới — mở URL trên tab hiện tại.");
             await page.GotoAsync(matched, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
             return page;
         }
 
-        log.Report("Đã khoanh cam link khớp — kéo chuột Windows tới link rồi click...");
-        await page.WaitForTimeoutAsync(400);
-
-        var loc = page.Locator("a[data-autoclick-target='1']").First;
-        var popupTask = session.Context.WaitForPageAsync(new() { Timeout = 8000 });
-        var clicked = await VisibleMouse.ClickAsync(page, loc, log, ct);
-        if (!clicked)
+        try { await target.BringToFrontAsync(); } catch { /* ignore */ }
+        try
         {
-            log.Report("Chuột Windows không click được, thử Playwright mouse.");
-            try
-            {
-                var box = await loc.BoundingBoxAsync();
-                if (box != null && box.Width > 2 && box.Height > 2)
-                {
-                    await page.Mouse.ClickAsync(box.X + box.Width / 2, box.Y + box.Height / 2);
-                    clicked = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                log.Report("Playwright mouse lỗi: " + ex.Message);
-            }
+            await target.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 25000 });
+        }
+        catch
+        {
+            // trang đích có thể chưa networkidle
         }
 
-        IPage target = page;
-        if (clicked)
+        if (LinkMatcher.IsGoogleResultsUrl(target.Url))
         {
+            log.Report("Tab mới vẫn là Google — đợi redirect...");
             try
             {
-                var popup = await popupTask;
-                session.OwnedPages.Add(popup);
-                target = popup;
-                log.Report("Link mở tab mới — chuyển sang tab đó.");
+                await target.WaitForURLAsync(
+                    url => !LinkMatcher.IsGoogleResultsUrl(url),
+                    new() { Timeout = 15000 });
             }
             catch
             {
-                target = page;
-            }
-
-            try
-            {
-                await target.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 25000 });
-            }
-            catch
-            {
-                // trang đích có thể chưa networkidle
-            }
-
-            if (LinkMatcher.IsGoogleResultsUrl(target.Url))
-            {
-                log.Report("Vẫn còn trang Google sau click, đợi redirect...");
-                try
-                {
-                    await target.WaitForURLAsync(
-                        url => !LinkMatcher.IsGoogleResultsUrl(url),
-                        new() { Timeout = 15000 });
-                }
-                catch
-                {
-                    log.Report("Chưa rời Google — thử click JS native.");
-                    await page.EvaluateAsync(@"() => {
-                        const a = document.querySelector('a[data-autoclick-target=""1""]');
-                        if (a) a.click();
-                    }");
-                    try
-                    {
-                        await target.WaitForURLAsync(
-                            url => !LinkMatcher.IsGoogleResultsUrl(url),
-                            new() { Timeout = 10000 });
-                    }
-                    catch
-                    {
-                        log.Report("Vẫn không vào được bằng click, mở URL trực tiếp.");
-                        await page.GotoAsync(matched, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
-                        target = page;
-                    }
-                }
+                await target.GotoAsync(matched, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
             }
         }
-        else
-        {
-            log.Report("Không click được — mở URL trực tiếp.");
-            await page.GotoAsync(matched, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
-            target = page;
-        }
 
-        log.Report("Trang đích: " + target.Url);
+        log.Report($"Đã mở {opened.Count(p => !p.IsClosed)} tab. Làm việc trên tab cuối: " + target.Url);
         return target;
+    }
+
+    /// <summary>Đánh dấu đúng thẻ tiêu đề của domain đích. Trả về URL đích đã unwrap, rỗng nếu không thấy.</summary>
+    static async Task<string> MarkMatchedLinkAsync(IPage page, string matched)
+        => await page.EvaluateAsync<string>(@"(matched) => {
+            const unwrap = (href, depth) => {
+                if (!href) return '';
+                depth = depth || 0;
+                if (depth > 3) return href;
+                try {
+                    const u = new URL(href, location.origin);
+                    const host = (u.hostname || '').toLowerCase();
+                    const path = (u.pathname || '').toLowerCase();
+                    const isGoogle = host.includes('google.') || host.includes('googleadservices.com')
+                        || host.includes('googlesyndication.com') || host.includes('doubleclick.net');
+                    const isRedirect = path === '/url' || path.startsWith('/url')
+                        || path.includes('/aclk') || path.includes('/pagead/');
+                    if (isGoogle && isRedirect) {
+                        const dest = u.searchParams.get('adurl') || u.searchParams.get('q') || u.searchParams.get('url');
+                        if (dest && /^https?:/i.test(dest)) return unwrap(dest, depth + 1);
+                    }
+                    return u.href;
+                } catch { return href; }
+            };
+            const hostOf = (u) => {
+                try { return new URL(unwrap(u), location.origin).hostname.replace(/^www\./i,'').toLowerCase(); }
+                catch { return ''; }
+            };
+            const wantHost = hostOf(matched);
+            const sameHost = (u) => {
+                const h = hostOf(u);
+                return !!(wantHost && h && (h === wantHost || h.endsWith('.' + wantHost) || wantHost.endsWith('.' + h)));
+            };
+            const cardOf = (a) => a.closest('.uEierd, [data-text-ad], .yuRUbf, div.g, .MjjYud, [data-sokoban-container]');
+            const destsOf = (a) => {
+                const list = [];
+                const push = (raw) => {
+                    (raw || '').split(/\s+/).forEach(x => { if (x) list.push(x); });
+                };
+                push(a.href || a.getAttribute('href') || '');
+                push(a.getAttribute('data-pcu'));
+                const card = cardOf(a);
+                if (card) {
+                    push(card.getAttribute('data-pcu'));
+                    card.querySelectorAll('cite').forEach(cite => {
+                        const host = (cite.innerText || '').match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i);
+                        if (host) list.push('https://' + host[1]);
+                    });
+                }
+                return list;
+            };
+            const skip = (a) => {
+                const href = a.getAttribute('href') || '';
+                if (!href || href.startsWith('#') || href.toLowerCase().startsWith('javascript:')) return true;
+                const label = ((a.getAttribute('aria-label') || '') + ' ' + (a.innerText || '')).toLowerCase();
+                return label.includes('about this result') || label.includes('thông tin về kết quả');
+            };
+            const score = (a) => {
+                if (skip(a) || !destsOf(a).some(sameHost)) return -1;
+                const r = a.getBoundingClientRect();
+                if (r.width < 10 || r.height < 8) return -1;
+                let s = 0;
+                if (a.querySelector('h3') || a.closest('h3')) s += 300;
+                if (a.getAttribute('jsname') === 'UWckNb') s += 80;
+                if ((a.innerText || '').trim().length > 12) s += 20;
+                s += Math.min(50, r.width / 8);
+                return s;
+            };
+
+            const nodes = document.querySelectorAll(
+                '#tads a, #tvcap a, #tadsb a, #bottomads a, [data-text-ad] a, .uEierd a, #search a, #rso a, #center_col a'
+            );
+            let best = null, bestScore = -1, bestDest = '';
+            nodes.forEach(a => {
+                const s = score(a);
+                if (s <= bestScore) return;
+                best = a;
+                bestScore = s;
+                const hit = destsOf(a).find(sameHost);
+                bestDest = unwrap(hit || a.href || '');
+            });
+            if (!best) return '';
+
+            document.querySelectorAll('[data-autoclick-target]').forEach(el => {
+                el.removeAttribute('data-autoclick-target');
+                el.style.outline = '';
+            });
+            best.setAttribute('data-autoclick-target', '1');
+            best.setAttribute('target', '_blank');
+            best.setAttribute('rel', 'noopener noreferrer');
+            best.style.outline = '4px solid #ff6d00';
+            best.style.outlineOffset = '3px';
+            best.scrollIntoView({ block: 'center', inline: 'nearest' });
+            return bestDest || unwrap(best.href || '');
+        }", matched) ?? "";
+
+    static async Task ClickOpenNewTabAsync(IPage page, ILocator loc, JobConfig config, IProgress<string> log, CancellationToken ct)
+    {
+        if (!config.Headless)
+        {
+            try { await VisibleMouse.MoveToAsync(page, loc, log, ct); }
+            catch { /* vẫn click Playwright trên đúng thẻ */ }
+        }
+
+        await ClickTargetWithPlaywrightAsync(loc, log);
+    }
+
+    static async Task ClickTargetWithPlaywrightAsync(ILocator loc, IProgress<string> log)
+    {
+        try
+        {
+            var title = loc.Locator("h3").First;
+            var click = await title.CountAsync() > 0 ? title : loc;
+            await click.ClickAsync(new()
+            {
+                Timeout = 8000,
+                Modifiers = [KeyboardModifier.Control],
+                Force = false
+            });
+        }
+        catch (Exception ex)
+        {
+            log.Report("    Playwright Ctrl+click lỗi: " + ex.Message);
+            try
+            {
+                await loc.ClickAsync(new() { Timeout = 5000, Button = MouseButton.Middle, Force = true });
+            }
+            catch
+            {
+                // fallback mở tab trực tiếp ở vòng lặp ngoài
+            }
+        }
+    }
+
+    static bool TabHitsTarget(string? url, string matched, MatchMode mode)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return false;
+        var dest = LinkMatcher.UnwrapGoogleHref(url);
+        return LinkMatcher.IsMatch(dest, matched, mode)
+               || LinkMatcher.IsMatch(url, matched, mode)
+               || LinkMatcher.SameSite(dest, matched);
+    }
+
+    static async Task WaitUntilLeftGoogleAsync(IPage tab)
+    {
+        try
+        {
+            await tab.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 12000 });
+        }
+        catch
+        {
+            // trang ads có thể redirect chậm
+        }
+
+        try
+        {
+            await tab.WaitForURLAsync(
+                url =>
+                {
+                    var dest = LinkMatcher.UnwrapGoogleHref(url);
+                    return !LinkMatcher.IsGoogleResultsUrl(url) && !LinkMatcher.IsGoogleInternal(dest);
+                },
+                new() { Timeout = 12000 });
+        }
+        catch
+        {
+            // giữ URL hiện tại
+        }
+    }
+
+    static async Task<bool> WaitForNewTabAsync(List<IPage> opened, int before, int timeoutMs, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (opened.Count > before && opened.Any(p => !p.IsClosed))
+                return true;
+            await Task.Delay(120, ct);
+        }
+        return opened.Count > before;
+    }
+
+    static async Task<IPage> OpenForcedTabAsync(BrowserSession session, string url, IProgress<string> log)
+    {
+        var tab = await session.Context.NewPageAsync();
+        try { await tab.SetViewportSizeAsync(BrowserLauncher.MiniContentWidth, BrowserLauncher.MiniContentHeight); } catch { /* ignore */ }
+        session.OwnedPages.Add(tab);
+        try
+        {
+            await tab.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
+        }
+        catch (Exception ex)
+        {
+            log.Report("    Mở tab trực tiếp lỗi: " + ex.Message);
+        }
+        return tab;
+    }
+
+    static async Task EnsureSearchPageAsync(IPage page, IProgress<string> log, CancellationToken ct)
+    {
+        if (LinkMatcher.IsGoogleResultsUrl(page.Url))
+            return;
+
+        log.Report("  Tab Google đã rời kết quả — quay lại để click tiếp.");
+        try
+        {
+            await page.GoBackAsync(new PageGoBackOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 15000 });
+        }
+        catch
+        {
+            // lần click sau sẽ đánh dấu lại hoặc mở tab trực tiếp
+        }
+        await Task.Delay(200, ct);
     }
 
     static async Task<string> SafeInnerTextAsync(IPage page)
@@ -616,16 +1019,23 @@ public static class GoogleCrawlerService
         }
     }
 
-    /// <summary>Back về Google. Tab mới thì đóng tab đích; cùng tab thì GoBack.</summary>
+    /// <summary>Back về Google. Đóng mọi tab đích đã mở; cùng tab thì GoBack.</summary>
     static async Task GoBackAfterVisitAsync(IPage targetPage, IPage searchPage, BrowserSession session, IProgress<string> log, CancellationToken ct)
     {
         log.Report("  Back về Google, chuẩn bị từ khóa tiếp theo...");
         try
         {
-            if (!ReferenceEquals(targetPage, searchPage) && !targetPage.IsClosed)
+            var extras = session.OwnedPages
+                .Where(p => !ReferenceEquals(p, searchPage) && !p.IsClosed)
+                .ToList();
+            foreach (var extra in extras)
             {
-                try { await targetPage.CloseAsync(); } catch { /* ignore */ }
-                session.OwnedPages.Remove(targetPage);
+                try { await extra.CloseAsync(); } catch { /* ignore */ }
+                session.OwnedPages.Remove(extra);
+            }
+
+            if (extras.Count > 0)
+            {
                 if (!searchPage.IsClosed)
                     await searchPage.BringToFrontAsync();
                 return;
@@ -647,7 +1057,7 @@ public static class GoogleCrawlerService
             {
                 if (!searchPage.IsClosed)
                 {
-                    await searchPage.GotoAsync("https://www.google.com/?hl=vi", new PageGotoOptions
+                    await searchPage.GotoAsync("https://www.google.com/", new PageGotoOptions
                     {
                         WaitUntil = WaitUntilState.DOMContentLoaded,
                         Timeout = 20000
@@ -661,6 +1071,42 @@ public static class GoogleCrawlerService
         }
 
         await Task.Delay(400, ct);
+    }
+
+    static async Task<bool> ClickElementAsync(
+        IPage page,
+        ILocator loc,
+        JobConfig config,
+        IProgress<string> log,
+        CancellationToken ct)
+    {
+        if (config.Headless)
+        {
+            await loc.ClickAsync(new() { Timeout = 8000 });
+            return true;
+        }
+
+        var osClick = await VisibleMouse.ClickAsync(page, loc, log, ct);
+        if (osClick)
+            return true;
+
+        log.Report("Chuột Windows không click được, thử Playwright.");
+        try
+        {
+            var box = await loc.BoundingBoxAsync();
+            if (box != null && box.Width > 2 && box.Height > 2)
+            {
+                await page.Mouse.ClickAsync(box.X + box.Width / 2, box.Y + box.Height / 2);
+                return true;
+            }
+            await loc.ClickAsync(new() { Timeout = 8000 });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log.Report("Playwright mouse lỗi: " + ex.Message);
+            return false;
+        }
     }
 
     static Task DelayAsync(JobConfig config, CancellationToken ct)

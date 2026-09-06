@@ -2,10 +2,22 @@ using System.Text.Json;
 
 namespace AutoClick.Services;
 
-/// <summary>Lưu device_id nội bộ — người dùng không thấy trên form.</summary>
+/// <summary>Lưu device_id và snapshot form vào %AppData%\AutoClick\user.json.</summary>
 public sealed class UserSettings
 {
     public string DeviceId { get; set; } = "";
+    public bool FormSaved { get; set; }
+    public string? BrowserKind { get; set; }
+    public string Proxy { get; set; } = "";
+    public string Keywords { get; set; } = "";
+    public string Targets { get; set; } = "";
+    public string ScanSite { get; set; } = "";
+    public int MaxGooglePages { get; set; } = 3;
+    public int DelayMs { get; set; } = 1500;
+    public int OpenNewTabClicks { get; set; } = 1;
+    public bool AutoRepeat { get; set; }
+    public bool Headless { get; set; }
+    public bool BouncePageRetry { get; set; }
 
     static string Dir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -44,5 +56,4 @@ public sealed class UserSettings
         }
         return s.DeviceId;
     }
-
 }
