@@ -57,6 +57,9 @@ public sealed class JobConfig
     /// <summary>Số lần click link khớp để mở tab mới (mỗi lần 1 tab).</summary>
     public int OpenNewTabClicks { get; init; } = 1;
 
+    /// <summary>Nghỉ giữa các lần click cùng một link mục tiêu (ms).</summary>
+    public int ClickIntervalMs { get; init; } = 200;
+
     /// <summary>Nghỉ giữa các thao tác (ms) cho giống người dùng, giảm bị chặn.</summary>
     public int DelayMs { get; init; } = 1500;
 

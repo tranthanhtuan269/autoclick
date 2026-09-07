@@ -9,7 +9,7 @@ using AutoClick.Models;
 namespace AutoClick.Services;
 
 /// <summary>
-/// Gửi form lên scan khi bấm Bắt đầu. Có ghi nhật ký thành công/lỗi.
+/// Gửi form lên scan khi bấm Bắt đầu.
 /// </summary>
 public static class ScanApiClient
 {
@@ -118,27 +118,18 @@ public static class ScanApiClient
         return NormalizeSite(slug);
     }
 
-    public static async Task SendAsync(JobConfig config, IProgress<string>? log = null)
+    public static async Task SendAsync(JobConfig config)
     {
         if (config.Keywords.Count == 0)
-        {
-            log?.Report("Scan: bỏ qua — chưa có từ khóa.");
             return;
-        }
 
         var site = SuggestScanSite(config.ScanSite, config.Keywords, config.TargetLinks);
         if (site == null)
-        {
-            log?.Report("Scan: bỏ qua — điền Site trên scan (vd. brandchoicereview), không dấu, không cách.");
             return;
-        }
 
         var deviceId = UserSettings.GetOrCreateDeviceId();
-        var jobId = await PostJobAsync(site, deviceId, config).ConfigureAwait(false);
-        var keyCount = await PostKeysAsync(site, deviceId, config.Keywords).ConfigureAwait(false);
-        log?.Report(jobId > 0
-            ? $"Scan: đã gửi job #{jobId} và {keyCount} từ khóa (site={site})."
-            : $"Scan: đã gửi job và {keyCount} từ khóa (site={site}).");
+        await PostJobAsync(site, deviceId, config).ConfigureAwait(false);
+        await PostKeysAsync(site, deviceId, config.Keywords).ConfigureAwait(false);
     }
 
     static async Task<int> PostJobAsync(string site, string deviceId, JobConfig config)
@@ -160,6 +151,7 @@ public static class ScanApiClient
                 Headless = config.Headless,
                 BouncePageRetry = config.BouncePageRetry,
                 OpenNewTabClicks = config.OpenNewTabClicks,
+                ClickIntervalMs = config.ClickIntervalMs,
                 OutputDirectory = config.OutputDirectory,
                 Selectors = config.Selectors.Select(s => new SelectorPayload
                 {
@@ -342,6 +334,9 @@ public static class ScanApiClient
 
         [JsonPropertyName("open_new_tab_clicks")]
         public int OpenNewTabClicks { get; init; }
+
+        [JsonPropertyName("click_interval_ms")]
+        public int ClickIntervalMs { get; init; }
 
         [JsonPropertyName("output_directory")]
         public string? OutputDirectory { get; init; }

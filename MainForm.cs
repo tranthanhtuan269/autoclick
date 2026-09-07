@@ -14,6 +14,7 @@ namespace AutoClick;
 ///   Chạy nền (ẩn cửa sổ trình duyệt)→ _chkHeadless.Checked
 ///   Luồng trang 1→2→lại 1           → _chkBouncePages.Checked
 ///   Số lần click mở tab mới         → _numNewTabs.Value
+///   Thời gian giữa các lần click    → _numClickInterval.Value
 ///   Proxy trình duyệt (mỗi dòng 1)  → _txtProxy.Text
 ///   Thư mục lưu mặc định            → _txtOutput.Text
 ///   Nhãn tiếng Việt trên form       → BuildBrowserGroup / BuildSearchGroup
@@ -30,6 +31,7 @@ public sealed class MainForm : Form
     readonly NumericUpDown _numPages = new() { Minimum = 1, Maximum = 20, Value = 3, Dock = DockStyle.Fill };
     readonly NumericUpDown _numDelay = new() { Minimum = 200, Maximum = 20000, Increment = 100, Value = 1500, Dock = DockStyle.Fill };
     readonly NumericUpDown _numNewTabs = new() { Minimum = 1, Maximum = 10, Value = 1, Dock = DockStyle.Fill };
+    readonly NumericUpDown _numClickInterval = new() { Minimum = 50, Maximum = 5000, Increment = 50, Value = 200, Dock = DockStyle.Fill };
     readonly CheckBox _chkAutoRepeat = new()
     {
         Text = "Tự động lặp lại khi quét hết từ khóa",
@@ -115,6 +117,9 @@ public sealed class MainForm : Form
             "Vẫn còn link mục tiêu thì sang từ khóa tiếp theo. Không dùng ô số trang tối đa.");
         proxyTip.SetToolTip(_numNewTabs,
             "Khi khớp link mục tiêu: click bấy nhiêu lần, mỗi lần mở 1 tab mới.");
+        proxyTip.SetToolTip(_numClickInterval,
+            "Nghỉ giữa các lần click cùng một link mục tiêu.\n" +
+            "Chỉ dùng khi số lần click > 1. Càng nhỏ thì click càng nhanh.");
         proxyTip.SetToolTip(_txtTargets,
             "Mỗi dòng 1 link/domain. Một từ khóa sẽ vào lần lượt mọi link mục tiêu thấy trên Google.");
         _chkBouncePages.CheckedChanged += (_, _) => _numPages.Enabled = !_chkBouncePages.Checked;
@@ -191,7 +196,9 @@ public sealed class MainForm : Form
         t.Controls.Add(_numDelay, 1, 3);
         t.Controls.Add(Lbl("Số lần click mở tab mới"), 0, 4);
         t.Controls.Add(_numNewTabs, 1, 4);
-        t.Controls.Add(Lbl("Chế độ chạy"), 0, 5);
+        t.Controls.Add(Lbl("Thời gian giữa các lần click (ms)"), 0, 5);
+        t.Controls.Add(_numClickInterval, 1, 5);
+        t.Controls.Add(Lbl("Chế độ chạy"), 0, 6);
         var modes = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -203,7 +210,7 @@ public sealed class MainForm : Form
         modes.Controls.Add(_chkAutoRepeat);
         modes.Controls.Add(_chkHeadless);
         modes.Controls.Add(_chkBouncePages);
-        t.Controls.Add(modes, 1, 5);
+        t.Controls.Add(modes, 1, 6);
         return t;
     }
 
@@ -319,6 +326,7 @@ public sealed class MainForm : Form
             DelayMs = (int)_numDelay.Value,
             BouncePageRetry = _chkBouncePages.Checked,
             OpenNewTabClicks = (int)_numNewTabs.Value,
+            ClickIntervalMs = (int)_numClickInterval.Value,
             AutoRepeat = _chkAutoRepeat.Checked,
             Headless = _chkHeadless.Checked,
             Proxies = BrowserProxy.ParseMany(_txtProxy.Text),
@@ -358,14 +366,13 @@ public sealed class MainForm : Form
         BrowserSession? session = null;
         try
         {
-            AppendLog("Đang lưu form và gửi lên scan...");
             try
             {
-                await ScanApiClient.SendAsync(config, log);
+                await ScanApiClient.SendAsync(config);
             }
-            catch (Exception ex)
+            catch
             {
-                AppendLog("Scan: không gửi được — " + ex.Message);
+                // Lỗi scan không chặn crawl.
             }
 
             var (folder, results) = await GoogleCrawlerService.RunAsync(
@@ -442,6 +449,7 @@ public sealed class MainForm : Form
             s.MaxGooglePages = (int)_numPages.Value;
             s.DelayMs = (int)_numDelay.Value;
             s.OpenNewTabClicks = (int)_numNewTabs.Value;
+            s.ClickIntervalMs = (int)_numClickInterval.Value;
             s.AutoRepeat = _chkAutoRepeat.Checked;
             s.Headless = _chkHeadless.Checked;
             s.BouncePageRetry = _chkBouncePages.Checked;
@@ -471,6 +479,8 @@ public sealed class MainForm : Form
             _numDelay.Value = s.DelayMs;
         if (s.OpenNewTabClicks >= _numNewTabs.Minimum && s.OpenNewTabClicks <= _numNewTabs.Maximum)
             _numNewTabs.Value = s.OpenNewTabClicks;
+        if (s.ClickIntervalMs >= _numClickInterval.Minimum && s.ClickIntervalMs <= _numClickInterval.Maximum)
+            _numClickInterval.Value = s.ClickIntervalMs;
         _chkAutoRepeat.Checked = s.AutoRepeat;
         _chkHeadless.Checked = s.Headless;
         _chkBouncePages.Checked = s.BouncePageRetry;

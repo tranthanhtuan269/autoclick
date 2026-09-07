@@ -733,56 +733,14 @@ public static class GoogleCrawlerService
                     continue;
                 }
 
-                var before = opened.Count;
                 var moveMouse = i == 1 || !alreadyMarked;
                 log.Report(moveMouse
                     ? $"  Click đích {i}/{clicks}: {markedDest}"
                     : $"  Click lại tại chỗ {i}/{clicks}: {markedDest}");
                 await ClickOpenNewTabAsync(page, loc, config, log, ct, moveMouse);
 
-                var got = await WaitForNewTabAsync(opened, before, 5000, ct);
-                if (!got)
-                {
-                    log.Report("    Click không ra tab mới — mở tab trực tiếp.");
-                    var tab = await OpenForcedTabAsync(session, matched, log);
-                    if (!opened.Contains(tab))
-                        opened.Add(tab);
-                    continue;
-                }
-
-                var extra = opened[^1];
-                await WaitUntilLeftGoogleAsync(extra);
-                if (!TabHitsTarget(extra.Url, matched, config.MatchMode))
-                {
-                    log.Report("    Tab lệch sang " + extra.Url + " — đóng và click lại đúng thẻ.");
-                    try { await extra.CloseAsync(); } catch { /* ignore */ }
-                    opened.Remove(extra);
-                    session.OwnedPages.Remove(extra);
-                    before = opened.Count;
-                    markedDest = await MarkMatchedLinkAsync(page, matched);
-                    loc = page.Locator("a[data-autoclick-target='1']").First;
-                    if (!string.IsNullOrWhiteSpace(markedDest) && await loc.CountAsync() > 0)
-                        await ClickTargetWithPlaywrightAsync(loc, log);
-                    got = await WaitForNewTabAsync(opened, before, 5000, ct);
-                    if (got)
-                    {
-                        extra = opened[^1];
-                        await WaitUntilLeftGoogleAsync(extra);
-                    }
-                    if (!got || !TabHitsTarget(opened[^1].Url, matched, config.MatchMode))
-                    {
-                        log.Report("    Vẫn lệch — mở đúng URL đích.");
-                        var tab = await OpenForcedTabAsync(session, matched, log);
-                        if (!opened.Contains(tab))
-                            opened.Add(tab);
-                        continue;
-                    }
-                }
-
-                log.Report("    Đã mở tab: " + opened[^1].Url);
-
-                await page.BringToFrontAsync();
-                await DelayAsync(config, ct);
+                if (i < clicks)
+                    await PauseBetweenClicksAsync(page, config, ct);
             }
         }
         finally
@@ -1199,6 +1157,12 @@ public static class GoogleCrawlerService
             log.Report("Playwright mouse lỗi: " + ex.Message);
             return false;
         }
+    }
+
+    static async Task PauseBetweenClicksAsync(IPage page, JobConfig config, CancellationToken ct)
+    {
+        try { await page.BringToFrontAsync(); } catch { /* ignore */ }
+        await Task.Delay(Math.Max(50, config.ClickIntervalMs), ct);
     }
 
     static Task DelayAsync(JobConfig config, CancellationToken ct)

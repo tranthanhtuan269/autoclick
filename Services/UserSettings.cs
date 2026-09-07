@@ -15,6 +15,7 @@ public sealed class UserSettings
     public int MaxGooglePages { get; set; } = 3;
     public int DelayMs { get; set; } = 1500;
     public int OpenNewTabClicks { get; set; } = 1;
+    public int ClickIntervalMs { get; set; } = 200;
     public bool AutoRepeat { get; set; }
     public bool Headless { get; set; }
     public bool BouncePageRetry { get; set; }
